@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: llm-benchmark-${JOB_SUFFIX}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      containers:
+      - name: benchmark
+        image: ${IMAGE_URI}
+        command: ["python", "src/benchmark.py"]
+        args:
+        - "--model"
+        - "${MODEL_ID}"
+        - "--batch-size"
+        - "1"
+        - "--input-len"
+        - "128"
+        - "--max-new-tokens"
+        - "128"
+        - "--iterations"
+        - "10"
+        resources:
+          limits:
+            nvidia.com/gpu: ${GPU_COUNT}
+        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+      restartPolicy: Never
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+      nodeSelector:
+        cloud.google.com/gke-accelerator: ${GPU_TYPE}
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "on-demand"
+        value: "true"
+        operator: "Equal"
+        effect: "NoSchedule"
