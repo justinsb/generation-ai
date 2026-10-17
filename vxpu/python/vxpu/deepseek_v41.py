@@ -139,6 +139,26 @@ def checkpoint_view(model, manifest_tensors):
     return direct, merged
 
 
+def _rotary_real(x, freqs_cis, inverse=False):
+    """The fork's apply_rotary_emb (rotate x in place, adjacent pairs as
+    complex numbers, freqs_cis complex64) in real arithmetic: the same
+    products, (a c - b s, a s + b c), on the table's real and imaginary
+    parts. Inductor cannot generate code for complex tensors, so the
+    complex form was four separate kernels per call that nothing could
+    fuse with; this form fuses into its neighbours."""
+    y = x
+    xf = x.float().unflatten(-1, (-1, 2))
+    half = xf.size(-2)
+    f = torch.view_as_real(freqs_cis)
+    f = f.view(1, x.size(1), half, 2) if x.ndim == 3 else f.view(1, x.size(1), 1, half, 2)
+    c, s = f[..., 0], f[..., 1]
+    if inverse:
+        s = -s
+    a, b = xf[..., 0], xf[..., 1]
+    y.copy_(torch.stack([a * c - b * s, a * s + b * c], dim=-1).flatten(-2))
+    return y
+
+
 def _hc_sinkhorn_op(mixes, hc_scale, hc_base, hc_mult=4, sinkhorn_iters=20, eps=1e-6):
     """The fork's hc_split_sinkhorn signature, routed to vxpu::hc_sinkhorn."""
     return torch.ops.vxpu.hc_sinkhorn(mixes, hc_scale, hc_base, hc_mult, sinkhorn_iters, eps)
@@ -157,6 +177,10 @@ def set_external(model, on):
     if not hasattr(ds, "_vxpu_hc_split_sinkhorn"):
         ds._vxpu_hc_split_sinkhorn = ds.hc_split_sinkhorn
     ds.hc_split_sinkhorn = _hc_sinkhorn_op if on else ds._vxpu_hc_split_sinkhorn
+    # the rotary embedding, likewise: real arithmetic that inductor can fuse
+    if not hasattr(ds, "_vxpu_apply_rotary_emb"):
+        ds._vxpu_apply_rotary_emb = ds.apply_rotary_emb
+    ds.apply_rotary_emb = _rotary_real if on else ds._vxpu_apply_rotary_emb
     for layer in model.layers:
         layer.ffn.experts_fn = torch.ops.vxpu.moe_experts if on else None
         if layer.engram is not None:
