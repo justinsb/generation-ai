@@ -1588,6 +1588,31 @@ class Engine:
                 "step_ms": [ms for ms, _ in steps], "rows_active": [n for _, n in steps if n],
                 "drafted": drafted, "accepted": accepted, "native": True}
 
+    def generate_batches(self, prompt_lists, max_new_tokens, params):
+        """generate_rows with one batch per list in `prompt_lists`, all in flight at once (the
+        pipeline across the layer ranges), returning one result dict per batch: that batch's
+        token_ids and prefill_ms, its own step_ms, and the run's drafted and accepted counts
+        split evenly (the loops count them together). The measurement harness
+        (dev/hero/batches.py) calls this; a driver that wants every field at once calls
+        generate_rows(batches=N, batch_of=...) itself."""
+        prompts, batch_of = [], []
+        for b, lst in enumerate(prompt_lists):
+            prompts += list(lst)
+            batch_of += [b] * len(lst)
+        started = time.time()
+        out = self.generate_rows(prompts, max_new_tokens, params, batches=len(prompt_lists), batch_of=batch_of)
+        ended = time.time()
+        results, at = [], 0
+        n = max(1, len(prompt_lists))
+        for b, lst in enumerate(prompt_lists):
+            k = len(lst)
+            results.append({"token_ids": out["token_ids"][at:at + k], "prefill_ms": out["prefill_ms"][at:at + k],
+                            "step_ms": list(out["batch_step_ms"][b]), "rows_active": [k] * len(out["batch_step_ms"][b]),
+                            "drafted": out.get("drafted", 0) // n, "accepted": out.get("accepted", 0) // n,
+                            "native": True, "start": started, "end": ended})
+            at += k
+        return results
+
     def _generate_rows_pipeline(self, requests, waiting, arrivals, batches, batch_of=None):
         """generate_rows with `batches` batches in flight (_PipelineRows): batch b holds its own
         state and captured step graphs and decodes on a native loop of its own, on streams of its
