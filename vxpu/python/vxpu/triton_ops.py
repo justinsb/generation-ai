@@ -117,6 +117,64 @@ if triton is not None:
         tl.store(y_ptr + offs, y.to(tl.bfloat16), mask=live[:, None])
 
 
+if triton is not None:
+    @triton.jit
+    def _x_mxfp8_kernel(x_ptr, xq_ptr, xe_ptr, K, KS, BK: tl.constexpr):
+        """A row of bf16 activations on the fp8 grid (act_quant's output) as the MXFP8 operand the
+        tensor cores take: its fp8 e4m3 codes and one e8m0 scale per 32 elements. The same
+        arithmetic as _act_quant_dequant_kernel finds the block's scale, so a value that was
+        round_e4m3(q) * scale comes back as exactly q and scale; nothing is rounded again. One
+        program per (row, BK elements)."""
+        m = tl.program_id(0).to(tl.int64)
+        k0 = tl.program_id(1) * BK
+        ks = k0 + tl.arange(0, BK)
+        kin = ks < K
+        x = tl.load(x_ptr + m * K + ks, mask=kin, other=0.0).to(tl.float32)
+        xg = tl.reshape(x, (BK // 32, 32))
+        amax = tl.maximum(tl.max(tl.abs(xg), axis=1), 1e-4)
+        v = amax / 448.0
+        bits = v.to(tl.int32, bitcast=True)
+        exponent = (bits >> 23) & 0xFF
+        exponent = tl.where((bits & 0x7FFFFF) == 0, exponent, exponent + 1)
+        scale = (exponent << 23).to(tl.float32, bitcast=True)
+        q = tl.minimum(tl.maximum(tl.reshape(xg / scale[:, None], (BK,)), -448.0), 448.0)
+        tl.store(xq_ptr + m * K + ks, q.to(tl.float8e4nv), mask=kin)
+        kb = k0 // 32 + tl.arange(0, BK // 32)
+        tl.store(xe_ptr + m * KS + kb, exponent.to(tl.uint8), mask=kb < KS)
+
+
+MXFP8_NATIVE = os.environ.get("VXPU_MXFP8_NATIVE")  # override: force the native (1) or converting (0) GEMV body (A/B)
+
+
+@functools.lru_cache(maxsize=None)
+def _mx_native(device_index):
+    """Whether the fp8 GEMV templates hand MXFP8 to the tensor cores on this GPU (Blackwell and
+    later take fp8 operands with e8m0 scales directly) or convert the weight to bf16 in software
+    first. Chosen from the card, not configured; VXPU_MXFP8_NATIVE only overrides it for an A/B.
+    Measured cold on an RTX PRO 6000 (eight weights cycled a replay), the one-weight kernel on a
+    5,120 x 8,192 weight: converting 32.6 us at one row and 44.6 at 33, native 31.6 and 33.3
+    with the conversion kernel included; on 1,280 x 5,120: 12.6 -> 9.5 and 17.4 -> 12.8."""
+    if MXFP8_NATIVE is not None:
+        return MXFP8_NATIVE == "1"
+    if triton is None or not hasattr(tl, "dot_scaled"):
+        return False
+    return _blackwell(device_index)
+
+
+def x_mxfp8(x, traced=False):
+    """x [M, K] bf16 on the fp8 grid -> (codes [M, K] float8_e4m3fn, scales [M, K / 32] uint8
+    e8m0): the activations' MXFP8 form, made once per GEMV call for the native body."""
+    M, K = x.shape
+    xq = torch.empty((M, K), dtype=torch.float8_e4m3fn, device=x.device)
+    xe = torch.empty((M, K // 32), dtype=torch.uint8, device=x.device)
+    if M:
+        bk = 256 if K % 256 == 0 else 32
+        kernel, ctx = _launcher(_x_mxfp8_kernel, x.device, traced)
+        with ctx:
+            kernel[(M, triton.cdiv(K, bk))](x, xq, xe, K, K // 32, BK=bk)
+    return xq, xe
+
+
 def act_quant_dequant(x, traced=False):
     """The fork's act_quant (32-element blocks, ue8m0 scales) followed by
     the dequantization, for a CUDA tensor whose last dim is a multiple
@@ -259,14 +317,18 @@ if triton is not None:
 
 if triton is not None:
     @triton.jit
-    def _gemv_rows_kernel(x_ptr, w_ptr, s_ptr, y_ptr, res_ptr, post_ptr, comb_ptr, add_ptr, M, N, K, XS, R, KS,
+    def _gemv_rows_kernel(x_ptr, xq_ptr, xe_ptr, w_ptr, s_ptr, y_ptr, res_ptr, post_ptr, comb_ptr, add_ptr, M, N, K, XS, R, KS,
                           HAS_SCALE: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
                           EPI_QUANT: tl.constexpr = False, KSPLIT: tl.constexpr = 1, EPI_HC: tl.constexpr = 0,
-                          HAS_ADD: tl.constexpr = False):
+                          HAS_ADD: tl.constexpr = False, NATIVE: tl.constexpr = False):
         """x [M, K] (bf16) times weight [N, K] transposed, every row of x by one pass over the
         weight: a program owns BN weight rows, streams them once, and multiplies each tile by all
         M rows of x on the tensor cores (tl.dot, bf16 in, fp32 accumulation; an fp8 weight times
-        its e8m0 block scale is exact in bf16, so the products are exact). Up to BM rows. With
+        its e8m0 block scale is exact in bf16, so the products are exact). With NATIVE the tensor
+        cores take the MXFP8 operands as they are: the fp8 weight tile with its e8m0 scales and
+        x's fp8 codes and e8m0 scales (xq_ptr, xe_ptr: x_mxfp8's output, the same layout as x
+        with K / 32 scales a row), tl.dot_scaled, no conversion in software; the products are
+        the same exact values, the sums come in the tensor core's order. Up to BM rows. With
         EPI_QUANT the bf16 outputs are quantized to the fp8 grid per 32 consecutive outputs of a
         row (the fork's act_quant before the next linear) before the store; BN is then a multiple
         of 32, so a program holds whole blocks. With KSPLIT > 1, that many programs share a row
@@ -291,16 +353,26 @@ if triton is not None:
             ks = k0 + tl.arange(0, BK)
             kin = ks < K
             w = tl.load(w_ptr + rows[:, None] * K + ks[None, :], mask=live[:, None] & kin[None, :], other=0.0)
-            if HAS_SCALE:
+            if NATIVE:
                 kb = k0 // 32 + tl.arange(0, BK // 32)
                 e = tl.load(s_ptr + (rows // 32)[:, None] * KS + kb[None, :],
-                            mask=live[:, None] & (kb < KS)[None, :], other=127).to(tl.int32)
-                sc = tl.where(e == 0, 5.877471754111438e-39, (e << 23).to(tl.float32, bitcast=True))
-                sc = tl.where(e == 255, float("nan"), sc)
-                w = tl.reshape(tl.reshape(w.to(tl.float32), (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
-            x = tl.load(x_ptr + ms[:, None] * XS + g * K + ks[None, :],
-                        mask=mlive[:, None] & kin[None, :], other=0.0)
-            acc += tl.dot(w.to(tl.bfloat16), tl.trans(x.to(tl.bfloat16)))
+                            mask=live[:, None] & (kb < KS)[None, :], other=127)
+                xq = tl.load(xq_ptr + ms[:, None] * XS + g * K + ks[None, :],
+                             mask=mlive[:, None] & kin[None, :], other=0.0)
+                xe = tl.load(xe_ptr + ms[:, None] * (XS // 32) + g * (K // 32) + kb[None, :],
+                             mask=mlive[:, None] & (kb < KS)[None, :], other=127)
+                acc = tl.dot_scaled(w, e, "e4m3", tl.trans(xq), xe, "e4m3", acc)
+            else:
+                if HAS_SCALE:
+                    kb = k0 // 32 + tl.arange(0, BK // 32)
+                    e = tl.load(s_ptr + (rows // 32)[:, None] * KS + kb[None, :],
+                                mask=live[:, None] & (kb < KS)[None, :], other=127).to(tl.int32)
+                    sc = tl.where(e == 0, 5.877471754111438e-39, (e << 23).to(tl.float32, bitcast=True))
+                    sc = tl.where(e == 255, float("nan"), sc)
+                    w = tl.reshape(tl.reshape(w.to(tl.float32), (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
+                x = tl.load(x_ptr + ms[:, None] * XS + g * K + ks[None, :],
+                            mask=mlive[:, None] & kin[None, :], other=0.0)
+                acc += tl.dot(w.to(tl.bfloat16), tl.trans(x.to(tl.bfloat16)))
         if EPI_QUANT:
             hg = tl.reshape(acc.to(tl.bfloat16).to(tl.float32), (BN // 32, 32, BM))  # the linear's bf16 output
             amax = tl.maximum(tl.max(tl.abs(hg), axis=1), 1e-4)
@@ -384,12 +456,19 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
     N, K = weight.shape
     R = group_rows or N
     bm, bn, bk = blocks or _rows_blocks(M, K)
-    if blocks is None and _blackwell(x.device):
-        # 32 weight rows per program on this card (measured cold on an RTX PRO 6000, 5120 x 8192
-        # fp8: 16 rows 33.3 us at one row of x and 36.8 at six; 32 rows 32.8 and 32.9), so the
-        # six-row verify step of a speculative decode stops paying 10 to 20% over one row. In the
-        # step: 26.6 -> 24.2 us a launch over 250 launches. The dual GEMV lost with 32 (28 -> 38 us),
-        # so only this kernel takes it. The planner's choice per shape and GPU; the record so far.
+    native = scale is not None and _mx_native(x.device.index)
+    if blocks is None and native:
+        # the native body's shape: 16 weight rows per program at every row count (measured cold on
+        # an RTX PRO 6000 through this dispatcher: 5,120 x 8,192 at one row 31.6 us against 32.6
+        # with 32 rows and 33.1 with 64; at 33 rows 33.2 against 33.6; 1,280 x 5,120 at 33 rows
+        # 12.1 against 14.9), with the 256-wide K step where K allows
+        bn = 16
+    elif blocks is None and _blackwell(x.device):
+        # 32 weight rows per program on this card for the converting body (measured cold on an RTX
+        # PRO 6000, 5120 x 8192 fp8: 16 rows 33.3 us at one row of x and 36.8 at six; 32 rows 32.8
+        # and 32.9), so the six-row verify step of a speculative decode stops paying 10 to 20% over
+        # one row. In the step: 26.6 -> 24.2 us a launch over 250 launches. The dual GEMV lost with
+        # 32 (28 -> 38 us), so only this kernel takes it. The planner's choice per shape and GPU.
         bn = max(bn, 32)
     if quant_out:
         bn = max(bn, 32)
@@ -424,13 +503,15 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
     if M and N:
         w = weight.contiguous()
         s = scale.contiguous().view(torch.uint8) if scale is not None else w
+        xc = x.contiguous()
+        xq, xe = x_mxfp8(xc, traced=traced) if native else (xc, xc)
         kernel, ctx = _launcher(_gemv_rows_kernel, x.device, traced)
         with ctx:
-            kernel[(triton.cdiv(N, bn), ksplit)](x.contiguous(), w, s, y, residual, post, comb, add, M, N, K,
+            kernel[(triton.cdiv(N, bn), ksplit)](xc, xq, xe, w, s, y, residual, post, comb, add, M, N, K,
                                                 x.shape[1], R, scale.shape[1] if scale is not None else 0,
                                                 HAS_SCALE=scale is not None, BM=bm, BN=bn, BK=bk,
                                                 EPI_QUANT=quant_out, KSPLIT=ksplit, EPI_HC=HC,
-                                                HAS_ADD=hc is not None and hc[3] is not None)
+                                                HAS_ADD=hc is not None and hc[3] is not None, NATIVE=native)
     return y
 
 
@@ -447,8 +528,9 @@ def _narrow_ksplit(N, bn, K, bk, device=None):
 
 if triton is not None:
     @triton.jit
-    def _dual_gemv_swiglu_kernel(x_ptr, w1_ptr, s1_ptr, w3_ptr, s3_ptr, h_ptr, M, N, K, KS, limit,
-                                 BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, KSPLIT: tl.constexpr = 1):
+    def _dual_gemv_swiglu_kernel(x_ptr, xq_ptr, xe_ptr, w1_ptr, s1_ptr, w3_ptr, s3_ptr, h_ptr, M, N, K, KS, limit,
+                                 BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, KSPLIT: tl.constexpr = 1,
+                                 NATIVE: tl.constexpr = False):
         """The SwiGLU front of an FFN for up to BM rows in one pass over both weights: a program
         owns BN rows of w1 and of w3 (fp8, e8m0 block scales), streams them once against all M rows
         of x (bf16 on the fp8 grid), and in its epilogue rounds the two products to bf16 as the
@@ -458,7 +540,8 @@ if triton is not None:
         program holds whole quantization blocks. With KSPLIT > 1, that many programs share a row
         tile, each reducing a K slice and storing its two fp32 partial sums in h_ptr as [KSPLIT, 2,
         M, N] (gate then up); _swiglu_rows_kernel adds them and does the epilogue (a shared expert
-        of 2,304 rows gives 72 programs otherwise)."""
+        of 2,304 rows gives 72 programs otherwise). NATIVE as in _gemv_rows_kernel: the tensor
+        cores take both weights' fp8 tiles with their e8m0 scales and x's codes and scales."""
         limit = limit.to(tl.float32)
         pid = tl.program_id(0)
         rows = pid.to(tl.int64) * BN + tl.arange(0, BN)
@@ -475,20 +558,31 @@ if triton is not None:
             kb = k0 // 32 + tl.arange(0, BK // 32)
             smask = live[:, None] & (kb < KS)[None, :]
             wmask = live[:, None] & kin[None, :]
-            x = tl.load(x_ptr + ms[:, None] * K + ks[None, :], mask=mlive[:, None] & kin[None, :], other=0.0)
-            xt = tl.trans(x.to(tl.bfloat16))
-            w = tl.load(w1_ptr + rows[:, None] * K + ks[None, :], mask=wmask, other=0.0)
-            e = tl.load(s1_ptr + (rows // 32)[:, None] * KS + kb[None, :], mask=smask, other=127).to(tl.int32)
-            sc = tl.where(e == 0, 5.877471754111438e-39, (e << 23).to(tl.float32, bitcast=True))
-            sc = tl.where(e == 255, float("nan"), sc)
-            w = tl.reshape(tl.reshape(w.to(tl.float32), (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
-            acc1 += tl.dot(w.to(tl.bfloat16), xt)
-            w = tl.load(w3_ptr + rows[:, None] * K + ks[None, :], mask=wmask, other=0.0)
-            e = tl.load(s3_ptr + (rows // 32)[:, None] * KS + kb[None, :], mask=smask, other=127).to(tl.int32)
-            sc = tl.where(e == 0, 5.877471754111438e-39, (e << 23).to(tl.float32, bitcast=True))
-            sc = tl.where(e == 255, float("nan"), sc)
-            w = tl.reshape(tl.reshape(w.to(tl.float32), (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
-            acc3 += tl.dot(w.to(tl.bfloat16), xt)
+            if NATIVE:
+                xq = tl.load(xq_ptr + ms[:, None] * K + ks[None, :], mask=mlive[:, None] & kin[None, :], other=0.0)
+                xe = tl.load(xe_ptr + ms[:, None] * KS + kb[None, :], mask=mlive[:, None] & (kb < KS)[None, :], other=127)
+                xqt = tl.trans(xq)
+                w = tl.load(w1_ptr + rows[:, None] * K + ks[None, :], mask=wmask, other=0.0)
+                e = tl.load(s1_ptr + (rows // 32)[:, None] * KS + kb[None, :], mask=smask, other=127)
+                acc1 = tl.dot_scaled(w, e, "e4m3", xqt, xe, "e4m3", acc1)
+                w = tl.load(w3_ptr + rows[:, None] * K + ks[None, :], mask=wmask, other=0.0)
+                e = tl.load(s3_ptr + (rows // 32)[:, None] * KS + kb[None, :], mask=smask, other=127)
+                acc3 = tl.dot_scaled(w, e, "e4m3", xqt, xe, "e4m3", acc3)
+            else:
+                x = tl.load(x_ptr + ms[:, None] * K + ks[None, :], mask=mlive[:, None] & kin[None, :], other=0.0)
+                xt = tl.trans(x.to(tl.bfloat16))
+                w = tl.load(w1_ptr + rows[:, None] * K + ks[None, :], mask=wmask, other=0.0)
+                e = tl.load(s1_ptr + (rows // 32)[:, None] * KS + kb[None, :], mask=smask, other=127).to(tl.int32)
+                sc = tl.where(e == 0, 5.877471754111438e-39, (e << 23).to(tl.float32, bitcast=True))
+                sc = tl.where(e == 255, float("nan"), sc)
+                w = tl.reshape(tl.reshape(w.to(tl.float32), (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
+                acc1 += tl.dot(w.to(tl.bfloat16), xt)
+                w = tl.load(w3_ptr + rows[:, None] * K + ks[None, :], mask=wmask, other=0.0)
+                e = tl.load(s3_ptr + (rows // 32)[:, None] * KS + kb[None, :], mask=smask, other=127).to(tl.int32)
+                sc = tl.where(e == 0, 5.877471754111438e-39, (e << 23).to(tl.float32, bitcast=True))
+                sc = tl.where(e == 255, float("nan"), sc)
+                w = tl.reshape(tl.reshape(w.to(tl.float32), (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
+                acc3 += tl.dot(w.to(tl.bfloat16), xt)
         if KSPLIT > 1:
             part = h_ptr + tl.program_id(1).to(tl.int64) * 2 * M * N
             omask = live[:, None] & mlive[None, :]
@@ -570,10 +664,12 @@ def shared_ffn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized=False, y_exper
     if M:
         kernel, ctx = _launcher(_dual_gemv_swiglu_kernel, x.device, traced)
         parts = torch.empty(ks, 2, M, I, dtype=torch.float32, device=x.device) if ks > 1 else h
+        native = _mx_native(x.device.index)
+        xq8, xe8 = x_mxfp8(xq, traced=traced) if native else (xq, xq)
         with ctx:
-            kernel[(triton.cdiv(I, bn), ks)](xq, w1.contiguous(), s1.contiguous().view(torch.uint8), w3.contiguous(),
-                                            s3.contiguous().view(torch.uint8), parts, M, I, K, s1.shape[1], limit,
-                                            BM=bm, BN=bn, BK=bk, KSPLIT=ks)
+            kernel[(triton.cdiv(I, bn), ks)](xq, xq8, xe8, w1.contiguous(), s1.contiguous().view(torch.uint8),
+                                            w3.contiguous(), s3.contiguous().view(torch.uint8), parts, M, I, K,
+                                            s1.shape[1], limit, BM=bm, BN=bn, BK=bk, KSPLIT=ks, NATIVE=native)
         if ks > 1:  # the epilogue over the partial sums
             epi, ctx = _launcher(_swiglu_rows_kernel, x.device, traced)
             with ctx:
@@ -589,10 +685,10 @@ def shared_ffn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized=False, y_exper
 
 if triton is not None:
     @triton.jit
-    def _gemv_pe_kernel(x_ptr, w_ptr, s_ptr, y_ptr, xn_ptr, nw_ptr, freqs_ptr, start_ptr, sign, M, N, K, KS, R, S, eps,
+    def _gemv_pe_kernel(x_ptr, xq_ptr, xe_ptr, w_ptr, s_ptr, y_ptr, xn_ptr, nw_ptr, freqs_ptr, start_ptr, sign, M, N, K, KS, R, S, eps,
                         PRO_NORM: tl.constexpr, PRO_ROTARY: tl.constexpr, PRO_QUANT: tl.constexpr,
                         STORE_XN: tl.constexpr, EPI_ROTARY: tl.constexpr, HD: tl.constexpr, RD: tl.constexpr,
-                        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+                        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, NATIVE: tl.constexpr = False):
         """_gemv_rows_kernel with the work around the GEMV folded in. Prologue, per row of x as it
         is read: RMSNorm with nw_ptr's weight (PRO_NORM; the fork's: fp32, rounded to bf16), then
         quantization to the fp8 grid per 32 elements (PRO_QUANT, act_quant with ue8m0 scales), the
@@ -604,7 +700,9 @@ if triton is not None:
         HD - RD and be even. PRO_ROTARY rotates the input the same way instead (the pairs along K,
         the last RD of every HD; sign picks the direction), for the
         attention's output. Weight rows come in groups of R, group g reading x[:, g * K:(g + 1)
-        * K] (R = N for one group; BN divides R)."""
+        * K] (R = N for one group; BN divides R). NATIVE (no prologue: x already on the fp8
+        grid) as in _gemv_rows_kernel: the tensor cores take the weight's fp8 tile with its scales
+        and x's codes and scales (xq_ptr, xe_ptr)."""
         eps = eps.to(tl.float32)
         sign = sign.to(tl.float32)
         pid = tl.program_id(0)
@@ -629,43 +727,53 @@ if triton is not None:
             ks = k0 + tl.arange(0, BK)
             kin = ks < K
             xmask = mlive[:, None] & kin[None, :]
-            x = tl.load(xb + ms[:, None] * XS + ks[None, :], mask=xmask, other=0.0).to(tl.float32)
-            if PRO_NORM:
-                nw = tl.load(nw_ptr + ks, mask=kin, other=0.0).to(tl.float32)
-                x = (nw[None, :] * (x * rstd[:, None])).to(tl.bfloat16).to(tl.float32)
-            if PRO_ROTARY:  # adjacent pairs along K, in the last RD of every HD elements
-                ev, od = tl.split(tl.reshape(x, (BM, BK // 2, 2)))  # (rows, pairs) each
-                even_k = k0 + 2 * tl.arange(0, BK // 2)
-                jk = even_k % HD
-                tail = (jk >= HD - RD) & (even_k < K)
-                pair = (jk - (HD - RD)) // 2
-                pm = mlive[:, None] & tail[None, :]
-                fb = freqs_ptr + pos[:, None] * RD + 2 * pair[None, :]
-                c = tl.load(fb, mask=pm, other=1.0)
-                sn = tl.load(fb + 1, mask=pm, other=0.0) * sign
-                x = tl.reshape(tl.join(ev * c - od * sn, ev * sn + od * c), (BM, BK))
-                x = x.to(tl.bfloat16).to(tl.float32)
-            if STORE_XN:
-                if pid == 0:
-                    tl.store(xn_ptr + ms[:, None] * K + ks[None, :], x.to(tl.bfloat16), mask=xmask)
-            if PRO_QUANT:
-                xg = tl.reshape(x, (BM, BK // 32, 32))
-                amax = tl.maximum(tl.max(tl.abs(xg), axis=2), 1e-4)
-                v = amax / 448.0
-                bits = v.to(tl.int32, bitcast=True)
-                exponent = (bits >> 23) & 0xFF
-                exponent = tl.where((bits & 0x7FFFFF) == 0, exponent, exponent + 1)
-                scale = (exponent << 23).to(tl.float32, bitcast=True)
-                q = tl.minimum(tl.maximum(xg / scale[:, :, None], -448.0), 448.0)
-                x = tl.reshape(_round_e4m3(q) * scale[:, :, None], (BM, BK))
-            w = tl.load(w_ptr + rows[:, None] * K + ks[None, :], mask=live[:, None] & kin[None, :], other=0.0)
-            kb = k0 // 32 + tl.arange(0, BK // 32)
-            e = tl.load(s_ptr + (rows // 32)[:, None] * KS + kb[None, :],
-                        mask=live[:, None] & (kb < KS)[None, :], other=127).to(tl.int32)
-            sc = tl.where(e == 0, 5.877471754111438e-39, (e << 23).to(tl.float32, bitcast=True))
-            sc = tl.where(e == 255, float("nan"), sc)
-            w = tl.reshape(tl.reshape(w.to(tl.float32), (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
-            acc += tl.dot(w.to(tl.bfloat16), tl.trans(x.to(tl.bfloat16)))
+            if NATIVE:
+                kb = k0 // 32 + tl.arange(0, BK // 32)
+                w = tl.load(w_ptr + rows[:, None] * K + ks[None, :], mask=live[:, None] & kin[None, :], other=0.0)
+                e = tl.load(s_ptr + (rows // 32)[:, None] * KS + kb[None, :],
+                            mask=live[:, None] & (kb < KS)[None, :], other=127)
+                xq = tl.load(xq_ptr + g * K + ms[:, None] * XS + ks[None, :], mask=xmask, other=0.0)
+                xe = tl.load(xe_ptr + g * (K // 32) + ms[:, None] * (XS // 32) + kb[None, :],
+                             mask=mlive[:, None] & (kb < KS)[None, :], other=127)
+                acc = tl.dot_scaled(w, e, "e4m3", tl.trans(xq), xe, "e4m3", acc)
+            else:
+                x = tl.load(xb + ms[:, None] * XS + ks[None, :], mask=xmask, other=0.0).to(tl.float32)
+                if PRO_NORM:
+                    nw = tl.load(nw_ptr + ks, mask=kin, other=0.0).to(tl.float32)
+                    x = (nw[None, :] * (x * rstd[:, None])).to(tl.bfloat16).to(tl.float32)
+                if PRO_ROTARY:  # adjacent pairs along K, in the last RD of every HD elements
+                    ev, od = tl.split(tl.reshape(x, (BM, BK // 2, 2)))  # (rows, pairs) each
+                    even_k = k0 + 2 * tl.arange(0, BK // 2)
+                    jk = even_k % HD
+                    tail = (jk >= HD - RD) & (even_k < K)
+                    pair = (jk - (HD - RD)) // 2
+                    pm = mlive[:, None] & tail[None, :]
+                    fb = freqs_ptr + pos[:, None] * RD + 2 * pair[None, :]
+                    c = tl.load(fb, mask=pm, other=1.0)
+                    sn = tl.load(fb + 1, mask=pm, other=0.0) * sign
+                    x = tl.reshape(tl.join(ev * c - od * sn, ev * sn + od * c), (BM, BK))
+                    x = x.to(tl.bfloat16).to(tl.float32)
+                if STORE_XN:
+                    if pid == 0:
+                        tl.store(xn_ptr + ms[:, None] * K + ks[None, :], x.to(tl.bfloat16), mask=xmask)
+                if PRO_QUANT:
+                    xg = tl.reshape(x, (BM, BK // 32, 32))
+                    amax = tl.maximum(tl.max(tl.abs(xg), axis=2), 1e-4)
+                    v = amax / 448.0
+                    bits = v.to(tl.int32, bitcast=True)
+                    exponent = (bits >> 23) & 0xFF
+                    exponent = tl.where((bits & 0x7FFFFF) == 0, exponent, exponent + 1)
+                    scale = (exponent << 23).to(tl.float32, bitcast=True)
+                    q = tl.minimum(tl.maximum(xg / scale[:, :, None], -448.0), 448.0)
+                    x = tl.reshape(_round_e4m3(q) * scale[:, :, None], (BM, BK))
+                w = tl.load(w_ptr + rows[:, None] * K + ks[None, :], mask=live[:, None] & kin[None, :], other=0.0)
+                kb = k0 // 32 + tl.arange(0, BK // 32)
+                e = tl.load(s_ptr + (rows // 32)[:, None] * KS + kb[None, :],
+                            mask=live[:, None] & (kb < KS)[None, :], other=127).to(tl.int32)
+                sc = tl.where(e == 0, 5.877471754111438e-39, (e << 23).to(tl.float32, bitcast=True))
+                sc = tl.where(e == 255, float("nan"), sc)
+                w = tl.reshape(tl.reshape(w.to(tl.float32), (BN, BK // 32, 32)) * sc[:, :, None], (BN, BK))
+                acc += tl.dot(w.to(tl.bfloat16), tl.trans(x.to(tl.bfloat16)))
         y = acc.to(tl.bfloat16).to(tl.float32)  # the linear's bf16 output, as the fork rotates it
         if EPI_ROTARY:
             y3 = tl.permute(tl.reshape(y, (BN // 2, 2, BM)), (0, 2, 1))  # (pairs, rows, 2)
@@ -722,11 +830,14 @@ def attn_q(x, wq_a, sa, norm_weight, norm_eps, wq_b, sb, freqs, start, seqlen, h
             post[(M,)](qr, norm_weight.contiguous(), freqs, start, 1.0, qq, qn, M, R, 1, seqlen, float(norm_eps),
                        NORM=True, RD=0, QUANT=True, STORE_PRE=True, BD=BR, KSUM=ks)
         kernel, ctx = _launcher(_gemv_pe_kernel, x.device, traced)
+        native = _mx_native(x.device.index)  # no prologue here: qq is on the fp8 grid already
+        qq8, qe8 = x_mxfp8(qq, traced=traced) if native else (qq, qq)
         with ctx:
-            kernel[(triton.cdiv(N, bn),)](qq, wq_b.contiguous(), sb.contiguous().view(torch.uint8), q, q, qq,
+            kernel[(triton.cdiv(N, bn),)](qq, qq8, qe8, wq_b.contiguous(), sb.contiguous().view(torch.uint8), q, q, qq,
                                          freqs, start, 1.0, M, N, R, sb.shape[1], N, seqlen, 0.0,
                                          PRO_NORM=False, PRO_ROTARY=False, PRO_QUANT=False, STORE_XN=False,
-                                         EPI_ROTARY=True, HD=head_dim, RD=rope_dim, BM=bm, BN=bn, BK=bk)
+                                         EPI_ROTARY=True, HD=head_dim, RD=rope_dim, BM=bm, BN=bn, BK=bk,
+                                         NATIVE=native)
     lead = tuple(x.shape[:-1])
     return qn.reshape(lead + (R,)), q.reshape(lead + (N,))
 
