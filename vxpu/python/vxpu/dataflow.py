@@ -377,6 +377,10 @@ class Runner(torch.nn.Module):
                 elif r.name in self.state and key not in self._fresh:
                     # a cache the owner GPU's layers wrote this step (a shared compressed KV, index keys):
                     # the replica here takes the owner's contents once a step, before its first reader
+                    try:
+                        t.vxpu_name = r.name
+                    except AttributeError:
+                        pass
                     _refresh_replica(self._copies[key], t)
                 if r.name in self.state:
                     self._fresh.add(key)
@@ -428,8 +432,10 @@ def _refresh_replica(dst, src):
     capturing stream carries no such dependency, and the capture's flag wait before this node
     already ordered it after the owner's writes."""
     if torch.cuda.is_current_stream_capturing():
-        from .stepgraph import _Driver
+        from .stepgraph import _Driver, COPY_LOG
         _Driver().memcpy(torch.cuda.current_stream(), dst, src)
+        COPY_LOG.append(("replica", getattr(src, "vxpu_name", "state"), str(src.device), str(dst.device), tuple(src.shape),
+                         str(src.dtype), src.numel() * src.element_size()))
     else:
         dst.copy_(src)
 
