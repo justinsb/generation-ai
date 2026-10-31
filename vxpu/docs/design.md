@@ -779,8 +779,17 @@ refresh followed the state being prefilled). The different-prompt
 pipeline runs at 66% of its ceiling of about 2,150 tok/s, set by the
 slowest range's bytes; the planner predicted all three pipeline cases
 within 13% before any of them ran. What did not land: the shared
-expert's island on the parallel branch (12.6 ms at one row when it
-holds), pending the branch's ordering fix. Against the six-card recipe:
+expert's island on the parallel branch. The ordering fault was found and
+fenced: the branch's events were right, but an island's kernels ran at
+the same time as the routed experts' kernels on the host node's own
+side stream, which the branch's events never covered, and one corrupts
+the other through a buffer not yet identified. The capture now follows
+one rule, held by a unit test: an island and a host node never run at
+the same time (an island after a host node waits for it; a host node
+waits for the branch). The attention islands keep their overlap (one row
+13.3 ms); the shared expert's front gains nothing under the rule and
+stays off by default. Finding the shared buffer is the way to its
+millisecond; `VXPU_BRANCH_TRACE=1` prints the capture's order. Against the six-card recipe:
 its 494 tok/s at 24 streams against our 1,414 at 132 rows in flight on
 four cards with different prompts; single-stream 103.8 against our 73,
 with the drafter 285 against our 100.
