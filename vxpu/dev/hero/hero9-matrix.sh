@@ -10,12 +10,12 @@ bench $L-b1 rows$A-b1 1 one
 bench $L-spec1 spec$D-b1 1 one
 bench $L-b33 rows$A-b33 1 one
 bench $L-b33 rows$A-b33 1 same
-bench $L-b33 rows$A-b33 1 different
+VXPU_EXPERT_STATS=1 bench $L-b33 rows$A-b33 1 different  # the distinct experts a step selects: the floor's bytes
 bench $L-b9 rows$A-b9 1 one
 bench $L-b9 rows$A-b9 1 same
-bench $L-b9 rows$A-b9 1 different
+VXPU_EXPERT_STATS=1 bench $L-b9 rows$A-b9 1 different
 # four batches in flight: the pipeline when the engine has it, else what today's engine does with four callers
-bench $L-b33x4 rows$A-b33 4 different
+VXPU_EXPERT_STATS=1 bench $L-b33x4 rows$A-b33 4 different
 bench $L-b33x4 rows$A-b33 4 same
 bench $L-b1x4 rows$A-b1 4 one
 python3 $HERO/table.py $OUT > $HERO/table.md

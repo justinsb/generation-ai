@@ -71,6 +71,7 @@ def parse_args():
     p.add_argument("--gpus", type=int, default=DEFAULT_GPUS, help="GPUs whose bandwidth the pipeline floor adds up")
     p.add_argument("--expert-bytes", type=float, default=None, help="bytes of one expert (default: from the manifest)")
     p.add_argument("--warmup-seconds", type=float, default=4.0)
+    p.add_argument("--topk", type=int, default=6, help="experts a token selects (the floor of one or same-prompt rows)")
     return p.parse_args()
 
 
@@ -280,7 +281,11 @@ def main():
         end = time.time()
         for b, out in enumerate(results):
             outs[b] = out
-            windows[b] = (out.get("start", group_start), out.get("end", end))
+            # the batches decode together from the group's start; a batch's window is its own decode
+            # time (its steps' sum), so the aggregate is tokens over decode time, as the single-batch
+            # line's decode_tokens_per_s is, not over the call's wall (which holds the prefill and the
+            # loops' set-up); end_to_end_tokens_per_s keeps the wall
+            windows[b] = (group_start, group_start + sum(out["step_ms"]) / 1e3)
     group_end = time.time()
 
     union = max(w[1] for w in windows) - min(w[0] for w in windows)
@@ -292,6 +297,8 @@ def main():
         steps_all = sum(len(o["step_ms"]) for o in outs)
         deltas = [counts1.get(l, 0) - counts0.get(l, 0) for l in range(layers)]
         distinct = round(sum(deltas) / max(1, steps_all) / layers, 1)
+    if distinct is None and args.mode in ("one", "same"):
+        distinct = float(args.topk)  # every row chooses the same experts: top-k of them a layer
     fl = floors(args.artifact, rows, engine.step_tokens, distinct, layers, args.gpus, per_expert)
     occupancy = None
     if stats is not None and hasattr(stats, "occupancy"):
