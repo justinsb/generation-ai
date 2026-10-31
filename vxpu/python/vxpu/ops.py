@@ -755,6 +755,115 @@ def _shared_ffn_reference(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, y_
     return _hc_post_reference(y.to(x.dtype), residual, post, comb)
 
 
+@custom_op("vxpu::shared_ffn_front", mutates_args=())  # pure tensor work: capturable
+def shared_ffn_front(x: torch.Tensor, w1: torch.Tensor, s1: torch.Tensor, w3: torch.Tensor, s3: torch.Tensor,
+                     w2: torch.Tensor, s2: torch.Tensor, swiglu_limit: float, quantized: bool) -> torch.Tensor:
+    """The shared expert alone (the fork's Expert.forward over x [b, s, K]: w1 and w3 [I, K] and
+    w2 [K, I] fp8 with e8m0 block scales, the SwiGLU's clamps at swiglu_limit, 0 for none),
+    returning its output [b, s, K] in x's dtype, the down projection's result as the fork's
+    linear rounds it. Nothing in it depends on the routed experts' sum, so the step graph runs
+    it beside the routed experts (segments.ISLAND_OPS) instead of after them, which vxpu::shared_ffn
+    could not: that op took the sum for its epilogue. shared_ffn_combine adds the sum and mixes
+    the stream. `quantized` says x is already on the fp8 grid (the FFN front's x_in)."""
+    impl = select("vxpu::shared_ffn_front", x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized)
+    return impl.fn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized)
+
+
+@shared_ffn_front.register_fake
+def _(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized):
+    return x.new_empty(x.shape)
+
+
+def _shared_ffn_front_context(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized):
+    rows = x.numel() // x.shape[-1]
+    return x.device.type, f"rows={rows} dim={x.shape[-1]} inter={w1.shape[0]}", {
+        "rows": rows, "dim": x.shape[-1], "inter": w1.shape[0]}
+
+
+def _shared_ffn_front_body(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, tk):
+    K = x.shape[-1]
+    xf = (x if quantized else tk.act_quant_dequant(x)).reshape(-1, K)
+    gate = tk.fp8_gemv(xf, w1, s1).float()
+    up = tk.fp8_gemv(xf, w3, s3).float()
+    if swiglu_limit > 0:
+        up = up.clamp(-swiglu_limit, swiglu_limit)
+        gate = gate.clamp(max=swiglu_limit)
+    h = (torch.nn.functional.silu(gate) * up).to(x.dtype)
+    return tk.fp8_gemv(tk.act_quant_dequant(h), w2, s2).reshape(x.shape).to(x.dtype)
+
+
+@implementation("vxpu::shared_ffn_front", "gpu-fused", ("cuda",), "rounding",
+                "the fp8 GEMVs with the SwiGLU between them as tensor operations for the compiler to fuse (lowering, "
+                "VXPU_FUSE; where it measures cheaper than the kernels)",
+                applies=lambda plan, lowering=False, rows=0, **_: _fusing(plan, lowering, "shared_ffn_front")
+                and rows <= FP8_GEMV_MAX_ROWS and _fp8_native(), lowerable=True, fused=True)
+def _shared_ffn_front_fused(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, tk=triton_ops):
+    return _shared_ffn_front_body(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, tk)
+
+
+@implementation("vxpu::shared_ffn_front", "gpu-triton", ("cuda",), "rounding",
+                "two or three Triton kernels: the input quantized unless it comes so, the dual GEMV over w1 and w3 "
+                "with the SwiGLU and the w2 input's quantization in its epilogue, the w2 GEMV",
+                applies=lambda plan, rows=0, dim=0, inter=0, **_: plan["triton"] and rows <= FP8_GEMV_MAX_ROWS
+                and dim % 32 == 0 and inter % 32 == 0 and _fp8_native(), lowerable=True)
+def _shared_ffn_front_triton(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, tk=triton_ops):
+    # the four optional arguments spelled out: the traced launch (the registered vxpu_triton op the lowering
+    # inlines) fills no defaults
+    return tk.shared_ffn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, None, None, None, None)
+
+
+@implementation("vxpu::shared_ffn_front", "reference", ("cpu", "cuda"), "bit-identical",
+                "the fork's Expert.forward: three fp8 linears (act_quant and fp8_gemm, aten) and the SwiGLU",
+                reference=True)
+def _shared_ffn_front_reference(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized):
+    gate = _fp8_linear_reference(x, w1, s1).float()  # the fork's linear quantizes x itself (idempotent)
+    up = _fp8_linear_reference(x, w3, s3).float()
+    if swiglu_limit > 0:
+        up = up.clamp(-swiglu_limit, swiglu_limit)
+        gate = gate.clamp(max=swiglu_limit)
+    h = (torch.nn.functional.silu(gate) * up).to(x.dtype)
+    return _fp8_linear_reference(h, w2, s2)
+
+
+@custom_op("vxpu::shared_ffn_combine", mutates_args=())  # pure tensor work: capturable
+def shared_ffn_combine(shared: torch.Tensor, y_experts: torch.Tensor, residual: torch.Tensor, post: torch.Tensor,
+                       comb: torch.Tensor) -> torch.Tensor:
+    """The MoE's tail after the two halves ran: the shared expert's output `shared` [b, s, K]
+    (shared_ffn_front) added to the routed experts' sum y_experts [b, s, K] fp32 and rounded to
+    bf16 as forward_routed does, then mixed back into the hyper-connection stream (the fork's
+    hc_post: residual [b, s, hc, K], post [b, s, hc], comb [b, s, hc, hc]). Returns the new
+    stream [b, s, hc, K] in shared's dtype. Elementwise work the compiler fuses into one or two
+    kernels; no kernel of its own."""
+    impl = select("vxpu::shared_ffn_combine", shared, y_experts, residual, post, comb)
+    return impl.fn(shared, y_experts, residual, post, comb)
+
+
+@shared_ffn_combine.register_fake
+def _(shared, y_experts, residual, post, comb):
+    return shared.new_empty(residual.shape)
+
+
+def _shared_ffn_combine_context(shared, y_experts, residual, post, comb):
+    rows = shared.numel() // shared.shape[-1]
+    return shared.device.type, f"rows={rows} dim={shared.shape[-1]} hc={residual.shape[-2]}", {
+        "rows": rows, "dim": shared.shape[-1]}
+
+
+@implementation("vxpu::shared_ffn_combine", "gpu-fused", ("cuda",), "bit-identical",
+                "the add, the rounding and the hyper-connection mix as tensor operations for the compiler to fuse "
+                "(lowering, VXPU_FUSE)",
+                applies=lambda plan, lowering=False, **_: _fusing(plan, lowering, "shared_ffn_combine"),
+                lowerable=True, fused=True)
+def _shared_ffn_combine_fused(shared, y_experts, residual, post, comb, tk=triton_ops):  # tk: the lowering's kernel namespace, unused here
+    return _hc_post_reference((y_experts + shared).to(shared.dtype), residual, post, comb)
+
+
+@implementation("vxpu::shared_ffn_combine", "reference", ("cpu", "cuda"), "bit-identical",
+                "forward_routed's y += shared in fp32, rounded, then the block's hc_post (aten)", reference=True)
+def _shared_ffn_combine_reference(shared, y_experts, residual, post, comb):
+    return _hc_post_reference((y_experts + shared).to(shared.dtype), residual, post, comb)
+
+
 @custom_op("vxpu::attn_q", mutates_args=())  # pure tensor work: capturable
 def attn_q(x: torch.Tensor, wq_a: torch.Tensor, sa: torch.Tensor, norm_weight: torch.Tensor, norm_eps: float,
            wq_b: torch.Tensor, sb: torch.Tensor, freqs_table: torch.Tensor, start: torch.Tensor, seqlen: int,
@@ -1600,6 +1709,8 @@ SELECTION = {
     "vxpu::head_linear": _head_context,
     "vxpu::rotary": _rotary_context,
     "vxpu::shared_ffn": _shared_ffn_context,
+    "vxpu::shared_ffn_front": _shared_ffn_front_context,
+    "vxpu::shared_ffn_combine": _shared_ffn_combine_context,
     "vxpu::attn_q": _attn_q_context,
     "vxpu::window_kv": _window_kv_context,
     "vxpu::attn_out": _attn_out_context,

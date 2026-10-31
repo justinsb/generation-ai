@@ -49,9 +49,11 @@ HOST_OPS = ("vxpu.moe_experts.default", "vxpu.engram_rows.default")
 # are independent of (stepgraph: a node that does not read the node before it goes on a parallel
 # branch). The attention's query projection and its key/value projection read the same input and
 # neither reads the other: the query path is 49 us at one row and the key/value one 9 us, and in
-# one compiled segment they ran one after the other. VXPU_ISLANDS overrides the list for an A/B
-# (empty: none).
-ISLAND_OPS = ("vxpu.attn_q.default", "vxpu.window_kv.default")
+# one compiled segment they ran one after the other. The shared expert's front (its three GEMVs,
+# about 47 us at one row) reads the FFN front's quantized input and nothing of the routed experts,
+# so it runs beside the experts node; its combine with the experts' sum follows. VXPU_ISLANDS
+# overrides the list for an A/B (empty: none).
+ISLAND_OPS = ("vxpu.attn_q.default", "vxpu.window_kv.default", "vxpu.shared_ffn_front.default")
 _islands_env = os.environ.get("VXPU_ISLANDS")
 if _islands_env is not None:
     ISLAND_OPS = tuple(f"vxpu.{name}.default" for name in _islands_env.split(",") if name)
