@@ -709,10 +709,15 @@ model said, with the first GPU idling more than modelled (35 to 45%).
 Two things had to stop being shared between steps in flight: the direct
 expert kernels' arrival counters (one buffer per GPU; three of four
 batches drifted to other tokens until each step graph got its own), and
-the cost measurement's placement of a real weight under sharding. The
-native MXFP8 body for the dense multiplications is merged alongside
-(33 rows: the wide multiplication 49 to 33 µs, 92% of bandwidth) and is
-not yet in these numbers; the boundary copies and the shared expert's
+the cost measurement's placement of a real weight under sharding. With
+the native MXFP8 body for the dense multiplications merged (33 rows: the
+wide multiplication 49 to 33 µs, 92% of bandwidth), the same four-batch
+runs read: 33 same-prompt rows 3,542 tok/s at 31 to 41 ms a batch
+(predicted 3,394); 33 different prompts 1,223 tok/s at 103 to 110 ms
+(predicted 1,243; ceiling 1,943); one row 258 tok/s at 13.9 to 14.2 ms
+(predicted 259). Batches identical to each other; against the fixed
+single-batch reference the first differing token moved from 26 to 28,
+the native body's rounding. The boundary copies and the shared expert's
 split are in progress.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
