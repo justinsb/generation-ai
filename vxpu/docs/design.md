@@ -756,6 +756,35 @@ node (rows differ at nine rows), so the island is off by default until
 the capture orders it; that fix is in progress, as is a CPU selftest
 regression on segments with two outputs.
 
+**Hero run 9, the table with everything merged (Oct 31, night; pod B,
+the merged tree with the boundary copies, the shared expert's split with
+its island off, the native fp8 body, the pipeline; measured by the
+harness, sustained aggregate = all batches' tokens over the longest
+batch's decode window):**
+
+| case | per-batch latency | sustained aggregate | predicted | before hero 9 |
+|---|---|---|---|---|
+| 1 row | 13.3 to 13.6 ms | 73 tok/s | 73 | 13.6 ms |
+| 1 row + drafter, 4 drafts | 25.7 ms, 2.56 tokens a step | about 100 tok/s | | 103 |
+| 33 rows, one batch: one / same / different | 29.0 / 26.9 / 95.6 ms | 345 same, 209 different | 982 / 370 | 35.0 / 32.8 / 99.2 |
+| 9 rows, one batch: one / same / different | 21.2 / 17.1 / 34.5 ms | 256 same, 170 different | 474 / 241 | 22.6 / 18.5 / 35.6 |
+| 4 batches × 1 row | 13.6 to 14.3 ms | 246 tok/s | 259 | 75 (one batch) |
+| 4 batches × 33 rows, same prompt | 27 to 37 ms | 3,575 to 3,776 tok/s | 3,346 | 1,021 (one batch) |
+| 4 batches × 33 rows, different prompts | 94 to 98 ms | 1,414 to 1,436 tok/s | 1,243 | 339 (one batch) |
+
+Every batch's tokens match the single-batch reference (after one fix:
+the prefill's replica refresh went to batch 0's graph for every batch,
+so batches 1 to 3 decoded on stale replicas for one matrix until the
+refresh followed the state being prefilled). The different-prompt
+pipeline runs at 66% of its ceiling of about 2,150 tok/s, set by the
+slowest range's bytes; the planner predicted all three pipeline cases
+within 13% before any of them ran. What did not land: the shared
+expert's island on the parallel branch (12.6 ms at one row when it
+holds), pending the branch's ordering fix. Against the six-card recipe:
+its 494 tok/s at 24 streams against our 1,414 at 132 rows in flight on
+four cards with different prompts; single-stream 103.8 against our 73,
+with the drafter 285 against our 100.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
