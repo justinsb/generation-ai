@@ -456,12 +456,19 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
     N, K = weight.shape
     R = group_rows or N
     bm, bn, bk = blocks or _rows_blocks(M, K)
-    if blocks is None and _blackwell(x.device):
-        # 32 weight rows per program on this card (measured cold on an RTX PRO 6000, 5120 x 8192
-        # fp8: 16 rows 33.3 us at one row of x and 36.8 at six; 32 rows 32.8 and 32.9), so the
-        # six-row verify step of a speculative decode stops paying 10 to 20% over one row. In the
-        # step: 26.6 -> 24.2 us a launch over 250 launches. The dual GEMV lost with 32 (28 -> 38 us),
-        # so only this kernel takes it. The planner's choice per shape and GPU; the record so far.
+    native = scale is not None and _mx_native(x.device.index)
+    if blocks is None and native:
+        # the native body's shape: 16 weight rows per program at every row count (measured cold on
+        # an RTX PRO 6000 through this dispatcher: 5,120 x 8,192 at one row 31.6 us against 32.6
+        # with 32 rows and 33.1 with 64; at 33 rows 33.2 against 33.6; 1,280 x 5,120 at 33 rows
+        # 12.1 against 14.9), with the 256-wide K step where K allows
+        bn = 16
+    elif blocks is None and _blackwell(x.device):
+        # 32 weight rows per program on this card for the converting body (measured cold on an RTX
+        # PRO 6000, 5120 x 8192 fp8: 16 rows 33.3 us at one row of x and 36.8 at six; 32 rows 32.8
+        # and 32.9), so the six-row verify step of a speculative decode stops paying 10 to 20% over
+        # one row. In the step: 26.6 -> 24.2 us a launch over 250 launches. The dual GEMV lost with
+        # 32 (28 -> 38 us), so only this kernel takes it. The planner's choice per shape and GPU.
         bn = max(bn, 32)
     if quant_out:
         bn = max(bn, 32)
@@ -497,7 +504,6 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
         w = weight.contiguous()
         s = scale.contiguous().view(torch.uint8) if scale is not None else w
         xc = x.contiguous()
-        native = scale is not None and _mx_native(x.device.index)
         xq, xe = x_mxfp8(xc, traced=traced) if native else (xc, xc)
         kernel, ctx = _launcher(_gemv_rows_kernel, x.device, traced)
         with ctx:
