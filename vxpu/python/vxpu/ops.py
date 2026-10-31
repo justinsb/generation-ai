@@ -854,7 +854,7 @@ def _shared_ffn_combine_context(shared, y_experts, residual, post, comb):
                 "(lowering, VXPU_FUSE)",
                 applies=lambda plan, lowering=False, **_: _fusing(plan, lowering, "shared_ffn_combine"),
                 lowerable=True, fused=True)
-def _shared_ffn_combine_fused(shared, y_experts, residual, post, comb):
+def _shared_ffn_combine_fused(shared, y_experts, residual, post, comb, tk=triton_ops):  # tk: the lowering's kernel namespace, unused here
     return _hc_post_reference((y_experts + shared).to(shared.dtype), residual, post, comb)
 
 
