@@ -225,6 +225,8 @@ def set_external(model, on):
     ds.ffn_front_fn = torch.ops.vxpu.ffn_front if on else None  # a block's FFN front half, up to the experts
     ds.hc_front_fn = torch.ops.vxpu.hc_front if on else None  # and the attention half's, up to the attention
     ds.shared_ffn_fn = torch.ops.vxpu.shared_ffn if on else None  # the MoE's shared expert
+    ds.shared_ffn_front_fn = torch.ops.vxpu.shared_ffn_front if on else None  # the shared expert beside the experts
+    ds.shared_ffn_combine_fn = torch.ops.vxpu.shared_ffn_combine if on else None  # its sum with theirs, and the mix
     ds.attn_q_fn = torch.ops.vxpu.attn_q if on else None  # the attention's query path
     ds.window_kv_fn = torch.ops.vxpu.window_kv if on else None  # and its window key
     ds.attn_out_fn = torch.ops.vxpu.attn_out if on else None  # and its output path
