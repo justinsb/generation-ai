@@ -601,10 +601,11 @@ pipelined with nothing else changed, about 1,300 tok/s (today 339 for
 one batch); with the two known losses fixed, the dense multiplications
 at 33 rows running at 60% of bandwidth (a native MXFP8 body, the run's
 one new template) and the 3.4 ms of state copies per boundary at 33
-rows, 2,000 to 3,000 tok/s, 20 to 30% of the aggregate floor; under
-1,500 is a failure to stop and understand. Four one-row batches should
-give about four times 75 tok/s at an unchanged 14 ms latency each; past
-about 17 ms the pipeline is interfering. Risks: the host side (four
+rows, 2,000 to 3,000 tok/s; under 1,500 is a failure to stop and
+understand. Four one-row batches should give about four times 75 tok/s
+at an unchanged 14 ms latency each; past about 17 ms the pipeline is
+interfering. The planner's cost model, below, turns these into the
+numbers the run is judged against. Risks: the host side (four
 steps' worth of host nodes and crossings per step time; the step trace
 is on from day one), GPU memory for four batches' caches and inboxes,
 cross-batch correctness (the same-prompt check per batch from the first
@@ -617,6 +618,74 @@ in the step graph and native loop; the native MXFP8 dense body; the
 boundary copies; the planner's pipeline cost model and plan output; the
 aggregate measurement harness; and, riding along, the shared expert's
 split for the one-row overlap and the first-prompt stall.
+
+**The physical plan as data, and the pipeline's cost model (hero run 9,
+the planner workstream).** The sharding switches and the hand placement
+file become one plan the engine reads, `vxpu-plan/1`
+(`pkg/kernelplan/pipeline.go`): the card it is for, the layer ranges in
+step order with their GPUs, where the ranges' experts live
+("with-layers": every expert of a range's layers on its GPU), the
+pipeline (batches in flight and the schedule rule, "range-order": a
+batch enters range k when GPU k is free and its range k-1 has finished,
+batches admitted round-robin), and the kernel table to apply. The
+engine's switch today, `VXPU_LAYER_DEVICES=0:8=cuda:0,...`, is what
+`PipelinePlan.LayerDevices()` renders, so an engine that still reads the
+switch is driven from the same plan.
+
+```json
+{"format": "vxpu-plan/1", "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+ "ranges": [{"gpu": 0, "layers": "0:8"}, {"gpu": 1, "layers": "8:20"},
+            {"gpu": 2, "layers": "20:32"}, {"gpu": 3, "layers": "32:43"}],
+ "experts": "with-layers", "pipeline": {"batches": 4, "schedule": "range-order"},
+ "kernels": "table-rows11-b1.json"}
+```
+
+The cost model (`pkg/planner/pipeline.go`, `vxpu plan pipeline`) prices
+a batch's step per range: the range's dense weights (the head on the
+last range) over the GPU's bandwidth, the experts as the distinct
+experts a layer times the expert's bytes times the range's layers over
+the bandwidth (at 87% of it with a prompt per row, where the grouped
+kernels run), and the step's cost besides bytes, 4.1 ms fixed plus 0.61
+ms a row, by the range's share of the layers. The two constants come
+from hero 8's same-prompt table (one row 13.6 ms, 9 rows 18.5, 33 rows
+32.8: the same 13 GB of bytes each), and the model then reproduces the
+table within 3% for the same prompt, within 6% at 9 rows with a prompt
+per row (37 distinct experts a layer, 35.6 ms) and within 10% at 33 (100
+distinct, 99.2 ms; within 3% at the 112 the profiled run selected). The
+per-layer bytes come from the artifact's binding (`ReadLayerBytes`; the
+checked-in inventory of DeepSeek-V4.1-Flash is
+`pkg/planner/testdata/deepseek-v41-flash-layers.json`). With N batches
+in flight over K ranges, a batch step completes every max(slowest range,
+sum of ranges / N) and a batch's own step takes max(sum, min(N, K) ×
+slowest).
+
+The predictions hero 9 is judged against (the test
+`TestPredictPipeline_Hero9Predictions` prints them; four batches, the
+current ranges, nothing else changed):
+
+| four batches of | aggregate | a batch step every | per-batch latency | one batch alone | floor at the slowest range's bytes |
+|---|---|---|---|---|---|
+| one row | 259 tok/s | 3.9 ms | 15.5 ms | 13.6 ms | 406 tok/s |
+| 33 rows, same prompt | 3,394 tok/s | 9.7 ms | 38.9 ms | 33.2 ms | 13,391 tok/s |
+| 33 rows, a prompt per row (100 distinct experts a layer) | 1,243 tok/s | 26.6 ms | 106 ms | 89.3 ms | 1,943 tok/s |
+
+Two things the model says before the run. The aggregate floor is not
+four times a single GPU's: with four batches in flight each GPU reads
+its own range's bytes for one batch per period, so the ceiling is the
+rows over the slowest range's bytes alone, 1,943 tok/s for 33 different
+prompts (not the "near 10,000" an earlier estimate in this section
+implied by dividing one batch's bytes by four GPUs' bandwidth; that
+number is the latency floor of one batch spread over four GPUs, which
+the pipeline does not do). More rows per batch raise the ceiling, since
+more rows share each expert read. And the ranges are not balanced for
+work: 8:20 and 20:32 hold twelve layers each, 0:8 and 32:43 eight, so
+the period is the twelve-layer ranges' time and the other two GPUs idle
+17 to 19% of it (`Balance` in the same package searches the cuts). The
+step may only be cut at the KV and index source layers (2, 8, 14, 20,
+24, 28, 32, 36), and under that constraint and 96 GB cards no four-way
+split has a shorter slowest range than the current one, so the
+imbalance is the model's to carry, not a placement to fix; a fifth GPU
+or a cut inside a KV group would change it.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
