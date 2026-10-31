@@ -73,6 +73,32 @@ hundreds of small operations per layer, the wrong altitude for planning;
 the engine lifts it once per model family to a coarse algebra (an attention
 query projection, an MoE front, the routed experts) and plans over that.
 
+What made the database engine possible was Codd's relational algebra: a
+set of operators small enough that a handful of equivalences cover every
+query, so a planner can rewrite freely and a cost model can score the
+results. The algebra under a decode step is smaller still: matrix
+multiplication, a few elementwise functions, reductions, gathers, and two
+data-dependent choices (the routing's top-k and the attention's
+selection). The rewrites a planner needs are correspondingly few. The
+linearity of the multiply gives the splits: split the reduction and add
+partial sums, split the output rows across programs, batch rows against
+one pass over the weights. Fusion of an elementwise function into its
+producer or consumer gives the glue work: quantization into the epilogue
+of the multiply that feeds it, rotary into the kernel that reads the
+table. Commuting a gather with a linear operation gives expert routing:
+gather the chosen experts then multiply, or multiply per expert then
+select. Two things have no counterpart in Codd's algebra and the engine
+carries them explicitly: a rewrite is equal only up to rounding, so every
+rule and every implementation has a numerics class (bit-identical or
+rounding-level); and the data-dependent choices need the analog of
+selectivity, an estimate of how many distinct experts a batch selects,
+which sets the batched step's byte floor. Quantization formats (fp4 and
+fp8 with block scales) play the role of storage layout, a physical
+property of the data the planner matches to the hardware, as when it
+chooses the native fp4 path on a Blackwell GPU. The cost model scores
+every plan the same way a database scores by I/O: bytes moved over the
+hardware's bandwidth, against the memory roofline.
+
 The claim, then, is this: treat the export as the logical plan, lift it to
 a coarse algebra once per model family, and let the planner produce the
 physical plan, with operators chosen from a hand-written library,
