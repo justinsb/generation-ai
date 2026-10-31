@@ -83,6 +83,7 @@ CU_STREAM_WRITE_VALUE_DEFAULT = 0x0  # with a system-wide memory fence before th
 
 EXPERT_STATS = os.environ.get("VXPU_EXPERT_STATS", "") == "1"  # count the distinct experts a step (measurement)
 PARALLEL_BRANCHES = os.environ.get("VXPU_PARALLEL_BRANCHES", "1") != "0"  # A/B: 0 keeps every node on one stream
+BRANCH_TRACE = os.environ.get("VXPU_BRANCH_TRACE") == "1"  # print each node's stream and the events it waits on (capture)
 EXPERT_STATS_LAYERS, EXPERT_STATS_EXPERTS = 64, 1024  # slots for layers and expert ids
 
 
@@ -262,6 +263,23 @@ def _check_flat(inputs, out, what):
             raise RuntimeError(f"native loop: the {what} step's {name} is not contiguous "
                                f"(shape {tuple(t.shape)}, stride {t.stride()}); the loop copies it flat")
 
+
+def branch_choice(kind, producers, main_last, main_last_kind, needs_wave, enabled=None):
+    """Where a node of the step runs and what it waits for, besides the nodes it reads: the
+    parallel branch takes a dense node that does not read the node captured last on the main
+    stream and waits on no other GPU's wave; a node on the branch right after a host node waits
+    for that host node too, and a host node waits for the whole branch before it starts (an
+    island and a host node never run at once: the host node's kernels run on a side stream of
+    their own, outside the branch's events, and the shared expert's front beside the routed
+    experts corrupted rows at nine rows until they were kept apart). Returns (on_par,
+    wait_main_last, host_waits_branch)."""
+    if enabled is None:
+        enabled = PARALLEL_BRANCHES
+    on_par = bool(enabled and kind == "dense" and main_last is not None and main_last not in producers
+                  and not needs_wave)
+    wait_main_last = on_par and main_last is not None and main_last_kind != "dense"
+    host_waits_branch = kind != "dense"
+    return on_par, wait_main_last, host_waits_branch
 
 class StepGraph(torch.nn.Module):
     """A dataflow runner's step as one CUDA graph (module docstring)."""
@@ -725,13 +743,16 @@ class StepGraph(torch.nn.Module):
                         continue
                     producers = {r.node for r in dataflow._flat(node.refs())
                                  if isinstance(r, dataflow.Ref) and r.kind == "edge" and node_dev[r.node] == d}
-                    on_par = (PARALLEL_BRANCHES and node.kind == "dense" and main_last is not None
-                              and main_last not in producers and not need[node.name])
+                    on_par, wait_main_last, host_waits_branch = branch_choice(
+                        node.kind, producers, main_last, graph.by_name[main_last].kind if main_last else None,
+                        bool(need[node.name]))
                     s = par if on_par else stream
                     for pname in producers:  # the nodes it reads, wherever they ran
                         ps, pe = done[pname]
                         if ps is not s:
                             s.wait_event(pe)
+                    if wait_main_last:  # an island never overlaps the host node before it (branch_choice)
+                        s.wait_event(done[main_last][1])
                     for key in need[node.name]:  # the waves of values other GPUs made for this node
                         f = wflags[key]
                         driver.wait_value(s, f.data_ptr(), 1)
@@ -739,6 +760,8 @@ class StepGraph(torch.nn.Module):
                     with torch.cuda.stream(s):
                         args_ = [resolve(r, d) for r in node.args]
                         kwargs_ = {k: resolve(r, d) for k, r in node.kwargs.items()}
+                        if host_waits_branch and par_used:
+                            stream.wait_stream(par)  # a host node starts after every island before it (branch_choice)
                         if node.kind == "dense":
                             module = getattr(self.split, node.name)
                             if not isinstance(module, aoti.GraphedSegment) or module.runner is None:
@@ -765,6 +788,19 @@ class StepGraph(torch.nn.Module):
                     ev = torch.cuda.Event()
                     ev.record(s)
                     done[node.name] = (s, ev)
+                    if BRANCH_TRACE and d == devs[0] and (node.layers and int(node.layers[0]) in (0, 1)):
+                        waits = [pn for pn in producers if done[pn][0] is not s]
+                        def _r(r):
+                            if isinstance(r, dataflow.Ref):
+                                return f"{r.kind}:{r.name or r.node}" + (f"[{r.index}]" if r.kind == "edge" and r.index is not None else "")
+                            return repr(r)[:12]
+                        shapes = [f"{tuple(a.shape)}:{str(a.dtype).replace('torch.', '')}@{a.data_ptr() % (1 << 32):x}"
+                                  if isinstance(a, torch.Tensor) else repr(a)[:10] for a in args_]
+                        outs = out if isinstance(out, (tuple, list)) else (out,)
+                        oshapes = [f"{tuple(o.shape)}@{o.data_ptr() % (1 << 32):x}" if isinstance(o, torch.Tensor) else "-" for o in outs]
+                        print(f"[branch] {d} {node.name} {node.kind} layers={node.layers} on={'par' if on_par else 'main'} "
+                              f"producers={sorted(producers)} waits_on={sorted(waits)} main_last={main_last}\n"
+                              f"         args={[ _r(r) for r in node.args ]}\n         shapes={shapes}\n         outs={oshapes}", flush=True)
                     if on_par:
                         par_used = True
                         self._branched += 1
