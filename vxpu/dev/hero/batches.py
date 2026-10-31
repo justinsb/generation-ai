@@ -294,7 +294,9 @@ def main():
     counts1 = stats.expert_stats() if counts0 is not None else None
     distinct = None
     if counts0 is not None and counts1 is not None:
-        steps_all = sum(len(o["step_ms"]) for o in outs)
+        # the counters sit in the engine's own step graph, which is batch 0's; the other batches' graphs
+        # carry none, so the per-step count divides by batch 0's steps (every batch selects alike)
+        steps_all = len(outs[0]["step_ms"]) if strategy == "pipeline" else sum(len(o["step_ms"]) for o in outs)
         deltas = [counts1.get(l, 0) - counts0.get(l, 0) for l in range(layers)]
         distinct = round(sum(deltas) / max(1, steps_all) / layers, 1)
     if distinct is None and args.mode in ("one", "same"):

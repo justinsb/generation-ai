@@ -717,8 +717,21 @@ runs read: 33 same-prompt rows 3,542 tok/s at 31 to 41 ms a batch
 (predicted 1,243; ceiling 1,943); one row 258 tok/s at 13.9 to 14.2 ms
 (predicted 259). Batches identical to each other; against the fixed
 single-batch reference the first differing token moved from 26 to 28,
-the native body's rounding. The boundary copies and the shared expert's
-split are in progress.
+the native body's rounding. Those aggregates sum each batch's own
+tokens over its own decode time. The measurement harness
+(`dev/hero/batches.py`, the matrix `hero9-matrix.sh`) counts the
+stricter way, all batches' tokens over the longest batch's decode
+window, which is what a server sustains with these four batches: in its
+run, one row 232 tok/s at 13.9 to 14.3 ms a batch (predicted 259), 33
+same-prompt rows 2,433 tok/s at 30 to 53 ms (predicted 3,346; one batch
+drifted to 53 ms where the others sat at 30 to 42), 33 different prompts
+1,148 tok/s at 103 to 108 ms (predicted 1,243), with 89.5 distinct
+experts a layer measured, which puts a single batch's floor at 51.9 ms
+and the pipeline's ceiling at about 2,100 tok/s; the measured aggregate
+is 54% of that ceiling. The harness's single-batch lines agree with hero
+8's (one row 13.4 ms, the drafter 25.4 ms at 2.37 tokens a step, 33 rows
+30.1 / 99.9 ms). The boundary copies and the shared expert's split are
+in progress.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
