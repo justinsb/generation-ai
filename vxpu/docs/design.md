@@ -728,9 +728,14 @@ drifted to 53 ms where the others sat at 30 to 42), 33 different prompts
 1,148 tok/s at 103 to 108 ms (predicted 1,243), with 89.5 distinct
 experts a layer measured, which puts a single batch's floor at 51.9 ms
 and the pipeline's ceiling at about 2,100 tok/s; the measured aggregate
-is 54% of that ceiling. The harness's single-batch lines agree with hero
-8's (one row 13.4 ms, the drafter 25.4 ms at 2.37 tokens a step, 33 rows
-30.1 / 99.9 ms). The boundary copies and the shared expert's split are
+is 54% of that ceiling. A repeat of the three pipeline lines minutes later
+read 33 same-prompt rows 3,594 tok/s at 30 to 37 ms a batch (the drift
+was a one-off), 33 different prompts 1,077 tok/s at 105 to 121 ms, one
+row 234 tok/s at 13.9 to 14.3 ms; so the same-prompt case sits 7% above
+its prediction and the other two 10 to 13% below, all inside the 20%
+the run set. The harness's single-batch lines agree with hero 8's (one
+row 13.4 ms, the drafter 25.4 ms at 2.37 tokens a step, 33 rows 30.1 /
+99.9 ms). The boundary copies and the shared expert's split are
 in progress.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
