@@ -176,6 +176,7 @@ def split_at_host_ops(gm):
     current = 0  # the dense segment being filled; a host op or an island takes the next number alone
     part = {}
     inside = None
+    alone_islands = []  # unfenced island ops cut into a segment of their own
     for node in gm.graph.nodes:
         here = island_of.get(order[node])
         if here != inside:  # entering or leaving an island: a new number either way
@@ -184,8 +185,19 @@ def split_at_host_ops(gm):
         if node.op == "call_function" and str(node.target) in HOST_OPS + (ISLAND_OPS if here is None else ()):
             part[node] = current + 1  # a segment of its own
             current += 2
+            if str(node.target) in ISLAND_OPS:
+                alone_islands.append(node)
         elif node.op in ("call_function", "call_method", "call_module"):
             part[node] = current
+    # an unfenced island op that returns several tensors keeps the getitems that unpack them in its
+    # segment: the segment then returns the tensors and the split hands each to its consumers through
+    # a top-level getitem, which the dataflow runner routes through an inbox per output. Left in the
+    # consumer's segment, the getitems made the island segment return its whole tuple as one value,
+    # and the runner kept a tuple in one inbox (no shape to plan, no copy to make).
+    for node in alone_islands:
+        for user in node.users:
+            if user.op == "call_function" and user.target is operator.getitem:
+                part[user] = part[node]
     # a lifted parameter or buffer goes with its first user
     for node in gm.graph.nodes:
         if node.op == "get_attr":
