@@ -53,7 +53,13 @@ HOST_OPS = ("vxpu.moe_experts.default", "vxpu.engram_rows.default")
 # about 47 us at one row) reads the FFN front's quantized input and nothing of the routed experts,
 # so it runs beside the experts node; its combine with the experts' sum follows. VXPU_ISLANDS
 # overrides the list for an A/B (empty: none).
-ISLAND_OPS = ("vxpu.attn_q.default", "vxpu.window_kv.default", "vxpu.shared_ffn_front.default")
+# The shared expert's front (vxpu.shared_ffn_front) is an island too, but off by default: on the
+# parallel branch its rows diverge at nine rows and its tokens change at one (its consumer is two
+# nodes later, after the experts host node, and the branch publishes or reads its output out of
+# order; the attention islands, consumed by the next node, never showed it). One row measured 12.6
+# ms with it on against 13.6 off. VXPU_ISLANDS=attn_q,window_kv,shared_ffn_front turns it on for the
+# A/B until the branch mechanism orders it.
+ISLAND_OPS = ("vxpu.attn_q.default", "vxpu.window_kv.default")
 _islands_env = os.environ.get("VXPU_ISLANDS")
 if _islands_env is not None:
     ISLAND_OPS = tuple(f"vxpu.{name}.default" for name in _islands_env.split(",") if name)
