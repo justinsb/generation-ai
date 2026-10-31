@@ -119,7 +119,10 @@ def _materialize(v, device):
     if not isinstance(v, torch.Tensor):
         return v
     if not isinstance(v, torch._subclasses.fake_tensor.FakeTensor):
-        return v
+        # a real tensor among the values (a weight the graph holds, still on the engine's GPU
+        # before the sharding moves it): measured where the site runs, like the fake ones, or
+        # the traced body mixes two GPUs on a fresh cost cache under layer sharding
+        return v if v.device == torch.device(device) else v.to(device)
     t = torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device=device)
     if t.is_floating_point() or t.is_complex():
         t.normal_()

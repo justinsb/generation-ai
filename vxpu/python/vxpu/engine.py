@@ -209,6 +209,8 @@ class Engine:
         self._copy_worker_hook = _copy_worker_hook or self._copy_worker_hook
         # The physical plan: every choice about how this engine runs the
         # artifact, made here once and reported by explain() (plan.py).
+        from . import physplan
+        physplan.apply_env()  # VXPU_PLAN=path: the plan file's ranges and kernel table, as the switches below
         self.plan = Plan(device, compile_decode=compile_decode, external_dir=external_dir, given=plan_given)
         # Where the tensors the graphs call out for (expert banks, n-gram
         # tables) are placed: None keeps them in host memory; a directory
@@ -1494,7 +1496,8 @@ class Engine:
             yield event
         session["cached_ids"] = list(ids) + [t for t in generated if t not in self.eos_ids]
 
-    def generate_rows(self, prompts, max_new_tokens, params, arrivals=None, telemetry=False):
+    def generate_rows(self, prompts, max_new_tokens, params, arrivals=None, telemetry=False, batches=1,
+                      batch_of=None):
         """Decode several prompts together, each in its own row of the batch: continuous batching,
         run to completion, as the scheduler runs it for concurrent requests.
 
@@ -1515,6 +1518,11 @@ class Engine:
         for request in requests:
             self._check_prompt(request.prompt)
         waiting = sorted(range(len(prompts)), key=lambda i: arrivals[i])
+        if batches > 1:
+            if telemetry or not all(self._native_rows(r.sampler) for r in requests) or self.step_tokens > 1:
+                raise ValueError("batches in flight need the captured step graph's native loop, one token a step, "
+                                 "no telemetry and no repetition penalty")
+            return self._generate_rows_pipeline(requests, waiting, arrivals, batches, batch_of)
         if not telemetry and all(self._native_rows(r.sampler) for r in requests):
             return self._generate_rows_native(requests, waiting, arrivals)
         step_ms, rows_active = [], []
@@ -1579,6 +1587,93 @@ class Engine:
         return {"token_ids": [r.token_ids for r in requests], "prefill_ms": [r.prefill_ms for r in requests],
                 "step_ms": [ms for ms, _ in steps], "rows_active": [n for _, n in steps if n],
                 "drafted": drafted, "accepted": accepted, "native": True}
+
+    def _generate_rows_pipeline(self, requests, waiting, arrivals, batches, batch_of=None):
+        """generate_rows with `batches` batches in flight (_PipelineRows): batch b holds its own
+        state and captured step graphs and decodes on a native loop of its own, on streams of its
+        own, so the GPUs work on different batches' layer ranges at once. Prompt i, in arrival
+        order, goes to batch i // rows. Returns, besides generate_rows' fields, "batch_step_ms":
+        each batch's step times, and "batch_rows": each prompt's batch."""
+        with self._lock:
+            rows = _PipelineRows(self, batches)
+            per_row = rows.rows
+            try:
+                with self.external_scope():
+                    rows.bind()
+                    assigned = {}
+                    order = list(waiting)
+                    for k, i in enumerate(order):  # prompt i's batch: given, else the next free chunk of rows
+                        assigned[i] = min(k // per_row, batches - 1) if batch_of is None else int(batch_of[i])
+                    while waiting or rows.active():
+                        progressed = False
+                        for b in range(batches):
+                            queue = [i for i in waiting if assigned[i] == b]
+                            row = rows.free_row(b)
+                            while (row is not None and queue
+                                   and (arrivals[queue[0]] <= rows.loops[b].steps() or not rows.requests[b])):
+                                i = queue.pop(0)
+                                waiting.remove(i)
+                                rows.admit(requests[i], b, row)
+                                progressed = True
+                                row = rows.free_row(b)
+                        rows.pump(0.001 if (waiting or progressed) else 0.02)
+                steps = [loop.take_steps() for loop in rows.loops]
+            finally:
+                rows.close()
+        flat = [ms for per in steps for ms, _ in per]
+        return {"token_ids": [r.token_ids for r in requests], "prefill_ms": [r.prefill_ms for r in requests],
+                "step_ms": flat, "rows_active": [n for per in steps for _, n in per if n],
+                "batch_step_ms": [[ms for ms, _ in per] for per in steps],
+                "batch_rows": [assigned[i] for i in range(len(requests))],
+                "drafted": 0, "accepted": 0, "native": True, "batches": batches}
+
+    def _rebind(self, state):
+        """Point the split programs' state buffers (the decode split and the prefill split, which
+        share them) at `state`'s tensors: what a step graph captured after this reads and writes,
+        and what the next prefill writes. _bind copies a session into the one resident state the
+        main step graph is bound to; batches in flight each need a state of their own bound to
+        graphs of their own, which this does by re-pointing the attributes the segments read
+        (dataflow._attr reads them by path each step)."""
+        from . import dataflow
+        state = {**state, **{alias: state[canonical] for alias, canonical in self.aliases.items()
+                             if canonical in state}}
+        modules = []
+        for holder in (self._decode_split, self._prefill_run, self._draft_run):
+            split = getattr(holder, "split", None)
+            if isinstance(split, torch.nn.Module) and split not in modules:
+                modules.append(split)
+        for module in modules:
+            for fqn, tensor in state.items():
+                parent, name = fqn.rsplit(".", 1) if "." in fqn else ("", fqn)
+                try:
+                    target = dataflow._attr(module, parent) if parent else module
+                except AttributeError:
+                    continue
+                if name in target._buffers:
+                    target._buffers[name] = tensor
+                elif isinstance(target.__dict__.get(name), torch.Tensor):
+                    setattr(target, name, tensor)
+
+    def _pipeline_graph(self, state):
+        """A captured step graph of the decode bound to `state`: a dataflow runner of its own
+        over the shared split (its own inboxes and replicas), placed as the main one, run once
+        eagerly and then captured, with the split re-pointed at `state` while it captures."""
+        from . import dataflow
+        from .stepgraph import StepGraph
+        main = self._decode_split
+        if not isinstance(main, StepGraph) or main.graph is None:
+            raise RuntimeError("batches in flight: the decode is not a captured step graph")
+        self._rebind(state)
+        runner = dataflow.Runner(main.split, *main.vxpu_segments, device=self.device,
+                                 graph=self._graph(main.split) if self.plan["layer_devices"] else None)
+        runner.state = set(self.binding["state"])
+        if self.plan["layer_devices"]:
+            runner.place(self._host_placement(runner.graph))
+        graph = StepGraph(runner, plan=self.plan)
+        values = self._zero_inputs(runner)
+        for _ in range(2):  # the first step eager (the inboxes allocated), the second captured
+            graph(**values)
+        return graph
 
     def _check_prompt(self, prompt):
         if not self.min_prefill_len <= len(prompt) <= self.max_cache_len - 1:
@@ -1825,13 +1920,14 @@ def _move_module_tensors(module, device):
 
 
 
-def _prefill_row(engine, state, request, row, row0_decodes):
+def _prefill_row(engine, state, request, row, row0_decodes, live=None):
     """Prefill request alone in row 0 (the prefill graph has one row), then move its state to
     `row`. When row 0 decodes another request (row0_decodes), its state is set aside for the
-    prefill and put back. Returns the prefill's logits."""
+    prefill and put back. `live` names the state tensors the prefill writes (a batch in flight's
+    own; default: the resident state, see _live_state). Returns the prefill's logits."""
     e = engine
     started = time.perf_counter()
-    live = e._live_state(state)
+    live = e._live_state(state) if live is None else live
     kept = {fqn: tensor[0].clone() for fqn, tensor in live.items()} if row != 0 and row0_decodes else None
     logits = e._prefill_run(input_ids=torch.tensor([request.prompt], dtype=torch.long, device=e.device),
                             cache_position=torch.arange(0, len(request.prompt), device=e.device))
@@ -2016,6 +2112,121 @@ class _NativeRows:
     def close(self):
         if self.loop is not None:
             self.loop.stop()
+
+
+class _PipelineRows:
+    """Several batches in flight (hero run 9). Batch 0 is the engine's own captured step graph
+    bound to the resident state; every other batch gets a state of its own (zeros shaped and
+    placed like the resident tensors) and step graphs captured against it (Engine._pipeline_graph).
+    Each batch decodes on a native loop of its own, launching on streams of its own per GPU: with
+    the layers sharded, the GPUs then run different batches' ranges at once, a batch's graph on
+    GPU k waiting (a stream memory wait) for its own range k-1 while another batch's range k runs.
+    Python admits requests between a batch's steps (that batch's loop paused for the prefill,
+    the others stepping) and hands the emitted tokens to their requests."""
+
+    FINISH = {1: "eos", 2: "length"}
+
+    def __init__(self, engine, batches):
+        e = engine
+        self.engine = e
+        self.n = batches
+        self.rows = e.binding.get("batch", 1)
+        if e._resident is None:
+            raise RuntimeError("batches in flight need the resident state of a split decode")
+        self.states = [e._resident]
+        self.graphs = [e._decode_split]
+        self.loops = []
+        self.requests = [{} for _ in range(batches)]
+        self._streams = []
+
+    def bind(self):
+        """Inside the engine's external scope (the captures resolve the experts and tables through
+        it): the other batches' states and step graphs, then a loop per batch."""
+        e = self.engine
+        started = time.perf_counter()
+        cache = e.__dict__.setdefault("_pipeline_graphs", [])  # (state, graph) per extra batch, kept across calls
+        built = 0
+        for b in range(1, self.n):
+            if len(cache) < b:
+                state = {fqn: torch.zeros_like(t) for fqn, t in e._resident.items()}
+                cache.append((state, e._pipeline_graph(state)))
+                built += 1
+            state, graph = cache[b - 1]
+            self.states.append(state)
+            self.graphs.append(graph)
+        nbytes = sum(t.numel() * t.element_size() for t in e._resident.values())
+        print(f"[vxpu] batches in flight: {self.n}, each {self.rows} rows; state {nbytes / 1e9:.2f} GB a batch; "
+              f"{built} more step graphs captured in {time.perf_counter() - started:.1f} s", flush=True)
+        trace = os.environ.get("VXPU_STEP_TRACE")
+        for b, graph in enumerate(self.graphs):
+            devices = graph.native_parts()[4]
+            streams = {d: torch.cuda.Stream(device=d) for d in devices}
+            self._streams.append(streams)
+            if trace:  # the step trace per batch: the loop opens its file when it is made
+                os.environ["VXPU_STEP_TRACE"] = f"{trace}.b{b}"
+            self.loops.append(graph.native_loop(draft=None, streams=streams))
+        if trace:
+            os.environ["VXPU_STEP_TRACE"] = trace
+        e._current = {"id": "pipeline", "state": self.states[0]}
+
+    def active(self):
+        return any(self.requests)
+
+    def free_row(self, b):
+        free = self.loops[b].free_rows()
+        return free[0] if free else None
+
+    def admit(self, request, b, row):
+        """Prefill request into row `row` of batch b, with that batch's loop held between steps
+        (the others keep stepping), emit its first token, and hand the row to the loop."""
+        e = self.engine
+        loop = self.loops[b]
+        loop.pause()
+        try:
+            e._rebind(self.states[b])  # the prefill writes this batch's caches
+            logits = _prefill_row(e, self.states[b], request, row, 0 not in loop.free_rows(), live=self.states[b])
+            first = request.sampler.pick(logits[0, -1], list(request.prompt))
+            request.emit(first)
+            if first in request.eos_ids:
+                request.finish("eos")
+            elif request.max_new_tokens <= 1 or len(request.prompt) + e.step_tokens > e.max_cache_len:
+                request.finish("length")
+            else:
+                self.requests[b][id(request)] = request
+                sampler = request.sampler
+                loop.admit(row, id(request), first, len(request.prompt), 1, request.max_new_tokens,
+                           sorted(request.eos_ids), e.max_cache_len,
+                           sampler.temperature if sampler.do_sample else 0.0, sampler.top_k, sampler.top_p)
+        finally:
+            loop.resume()
+
+    def pump(self, timeout):
+        """Hand every loop's emitted tokens to their requests. Returns how many requests still decode."""
+        left = 0
+        for b, loop in enumerate(self.loops):
+            requests = self.requests[b]
+            for rid, request in list(requests.items()):
+                if request.cancelled:
+                    loop.cancel(rid)
+            for rid, tokens, finish, error in loop.events(timeout / max(1, len(self.loops))):
+                request = requests.get(rid)
+                if request is None:
+                    continue
+                for token_id in tokens:
+                    request.emit(token_id)
+                if finish:
+                    del requests[rid]
+                    if finish in self.FINISH:
+                        request.finish(self.FINISH[finish])
+                    elif error:
+                        request.fail(RuntimeError(error))
+            left += len(requests)
+        return left
+
+    def close(self):
+        for loop in self.loops:
+            loop.stop()
+        self.engine._rebind(self.states[0])  # the split points at the resident state again
 
 
 class _ModelDrafter:
