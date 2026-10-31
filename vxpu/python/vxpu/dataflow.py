@@ -324,6 +324,7 @@ class Runner(torch.nn.Module):
                 for d in devices:  # one inbox per consumer device
                     key = (node.name, index, d)
                     if not isinstance(value, torch.Tensor):  # a number a segment computed (a prefill's length)
+                        print(f"[vxpu-debug] non-tensor inbox {key}: {type(value).__name__} {value if not isinstance(value, (tuple, list)) else [type(v).__name__ + str(tuple(getattr(v, 'shape', ()))) for v in value]} from node {node.name} ({node.kind}, layers {node.layers}) fanout index {index}", flush=True)
                         self.inboxes[key] = value
                         continue
                     # allocated once, then the same address every step (a decode step's shapes never

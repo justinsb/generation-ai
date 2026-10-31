@@ -807,7 +807,9 @@ def _shared_ffn_front_fused(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, 
                 applies=lambda plan, rows=0, dim=0, inter=0, **_: plan["triton"] and rows <= FP8_GEMV_MAX_ROWS
                 and dim % 32 == 0 and inter % 32 == 0 and _fp8_native(), lowerable=True)
 def _shared_ffn_front_triton(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, tk=triton_ops):
-    return tk.shared_ffn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized)
+    # the four optional arguments spelled out: the traced launch (the registered vxpu_triton op the lowering
+    # inlines) fills no defaults
+    return tk.shared_ffn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, None, None, None, None)
 
 
 @implementation("vxpu::shared_ffn_front", "reference", ("cpu", "cuda"), "bit-identical",
