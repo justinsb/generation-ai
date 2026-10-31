@@ -323,8 +323,13 @@ class Runner(torch.nn.Module):
                 value = out if index is None else out[index]
                 for d in devices:  # one inbox per consumer device
                     key = (node.name, index, d)
+                    if isinstance(value, (tuple, list)):
+                        # a segment handing its whole tuple to a consumer: the cut must unpack it
+                        # (segments.split_at_host_ops), or no inbox has a shape and nothing is copied
+                        raise RuntimeError(f"dataflow: node {node.name} ({node.kind}, layers {node.layers}) hands "
+                                           f"{len(value)} outputs to its consumers as one tuple; cut the graph so "
+                                           f"each output crosses on its own")
                     if not isinstance(value, torch.Tensor):  # a number a segment computed (a prefill's length)
-                        print(f"[vxpu-debug] non-tensor inbox {key}: {type(value).__name__} {value if not isinstance(value, (tuple, list)) else [type(v).__name__ + str(tuple(getattr(v, 'shape', ()))) for v in value]} from node {node.name} ({node.kind}, layers {node.layers}) fanout index {index}", flush=True)
                         self.inboxes[key] = value
                         continue
                     # allocated once, then the same address every step (a decode step's shapes never
