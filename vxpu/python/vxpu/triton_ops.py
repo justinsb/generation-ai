@@ -2331,15 +2331,33 @@ def fp4_experts_decode(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limi
 _FP4_COUNTERS = {}
 
 
+FP4_COUNTER_SCOPE = None  # set by a step graph while it captures: its counters live with its graphs
+
+
 def _fp4_counters(dev, size):
     """The down kernel's arrival counters, one buffer per GPU and size, zero between calls: the
     last program of each (token, row tile) resets its counter, so no fill launch is needed per
-    layer. The layers of a step run in order on their GPU, so they share the buffer."""
-    key = (str(dev), size)
+    layer. The layers of a step run in order on their stream, so they share the buffer. Two steps
+    in flight on one GPU (hero run 9: a batch per layer range) must not share it, or their
+    arrivals add up across batches and the sums come out wrong (with four one-row batches three
+    produced other tokens than the single-batch run). A step graph capturing sets
+    FP4_COUNTER_SCOPE to a list of its own: the buffers made under it are keyed by it, handed to
+    the list (they live as long as the graphs) and forgotten here when the capture ends, so a
+    later graph never reuses memory a freed graph's pool gave back (an illegal address)."""
+    scope = FP4_COUNTER_SCOPE
+    key = (str(dev), size, id(scope) if scope is not None else None)
     buf = _FP4_COUNTERS.get(key)
     if buf is None:
         buf = _FP4_COUNTERS[key] = torch.zeros(size, dtype=torch.int32, device=dev)
+        if scope is not None:
+            scope.append(buf)
     return buf
+
+
+def fp4_counter_scope_end(scope):
+    """The capture under `scope` is over: its counters belong to it alone now."""
+    for key in [k for k in _FP4_COUNTERS if k[2] == id(scope)]:
+        del _FP4_COUNTERS[key]
 
 
 def _fp4_experts_direct(x_in, weights, slot_map, indices, start, w1, s1, w3, s3, w2, s2, swiglu_limit, per_pair,
