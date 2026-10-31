@@ -83,6 +83,9 @@ CU_STREAM_WRITE_VALUE_DEFAULT = 0x0  # with a system-wide memory fence before th
 
 EXPERT_STATS = os.environ.get("VXPU_EXPERT_STATS", "") == "1"  # count the distinct experts a step (measurement)
 PARALLEL_BRANCHES = os.environ.get("VXPU_PARALLEL_BRANCHES", "1") != "0"  # A/B: 0 keeps every node on one stream
+STEP_COPIES = os.environ.get("VXPU_STEP_COPIES") == "1"  # list every copy the captured step makes between GPUs
+CACHE_WINDOWS = os.environ.get("VXPU_CACHE_WINDOWS", "1") != "0"  # A/B: 0 refreshes shared-cache replicas whole, as before
+COPY_LOG = []  # (what, name, src GPU, dst GPU, shape, dtype, bytes) for the step's GPU-to-GPU copies, filled at capture
 EXPERT_STATS_LAYERS, EXPERT_STATS_EXPERTS = 64, 1024  # slots for layers and expert ids
 
 
@@ -505,6 +508,7 @@ class StepGraph(torch.nn.Module):
         if EXPERT_STATS:  # the distinct-expert counters, allocated before any capture (see _count_experts)
             self._expert_counts = {d: torch.zeros(EXPERT_STATS_LAYERS, dtype=torch.int64, device=d) for d in devs}
         answers = self._answers(host_nodes, boxes, pooled, external)  # before any capture: builds packages
+<<<<<<< HEAD
         # the expert kernels' arrival counters belong to these graphs (triton_ops._fp4_counters):
         # another step graph in flight gets its own. They are made by the warm-up, outside any
         # capture: a buffer made inside one is a memset node on the capture stream, unordered
@@ -520,6 +524,34 @@ class StepGraph(torch.nn.Module):
             triton_ops.FP4_COUNTER_SCOPE = None
             triton_ops.fp4_counter_scope_end(scope)
         self._keep = self._keep + (scope,)
+=======
+        self._warm(pooled, runner, inputs, node_dev)
+        torch.cuda.synchronize()
+        self._capture_all(graph, mailboxes, boxes, pooled, peers, driver, flags, F, flag, sides, dev, devs, node_dev,
+                          in_copies, resolve, produced, host_nodes, answers)
+        if COPY_LOG:  # what the step moves between GPUs: the bytes a crossing costs
+            total = sum(c[-1] for c in COPY_LOG)
+            big = sorted(COPY_LOG, key=lambda c: -c[-1])[:6]
+            print(f"[vxpu] the step copies {len(COPY_LOG)} tensors between GPUs, {total / 1e6:.1f} MB; the largest: "
+                  + ", ".join(f"{c[1]} {c[2]}->{c[3]} {c[4]} {c[5].replace('torch.', '')} {c[-1] / 1e6:.2f} MB" for c in big),
+                  flush=True)
+            if STEP_COPIES:
+                for c in COPY_LOG:
+                    print(f"[vxpu]   copy {c[0]} {c[1]} {c[2]}->{c[3]} {c[4]} {c[5]} {c[-1]} B", flush=True)
+
+    def refresh_rows(self, rows):
+        """A prompt's prefill wrote these rows of the shared caches outside the captured step
+        (the prefill program runs through its own runner): the replicas take those rows whole,
+        once, so the step's windows have a correct base to add to."""
+        windows = getattr(self, "_windows", None)
+        if not windows:
+            return
+        for w in windows.values():
+            for row in rows:
+                w["replica"][row].copy_(w["src"][row])
+        for d in {w["replica"].device for w in windows.values()} | {w["src"].device for w in windows.values()}:
+            torch.cuda.synchronize(d)
+>>>>>>> h9-copies
 
     def _warm(self, pooled, runner, inputs, node_dev):
         """Every kernel the captures will launch, run once first on the
@@ -694,6 +726,55 @@ class StepGraph(torch.nn.Module):
                   f"GPUs in {len(wflags)} flags ({len(in_copies)} step inputs copied, {len(in_flags)} input flags), "
                   f"the chosen tokens read from {out_dev}", flush=True)
         self.crossings = (len(xvalue_wave), len(wflags), len(in_flags))
+        del COPY_LOG[:]
+        # A cache written by a layer on one GPU and read by layers on another (layer 20's
+        # compressed KV and index keys, read by layers 20 to 39 across a range boundary) was
+        # refreshed whole once a step: at 33 rows 138 + 35 MB a step over PCIe, 3.4 ms of a
+        # 99 ms step, for the one slot per row the step had written. The replica now takes
+        # the step's window only: the writer's GPU gathers rows' slots [position, position +
+        # tokens) into a staging buffer right after the writing node, copies it across, and
+        # the reader's GPU scatters it into the replica before the first node that reads it,
+        # 33 KB instead of 173 MB a step. The positions are the step's inputs, so the gather
+        # and scatter are kernels in the graphs with fixed buffers, not copies with baked
+        # addresses. Caches not shaped [rows, positions, ...] keep the whole-tensor refresh.
+        windows = {}  # (cache name, reader GPU) -> what the window needs
+        inputs_now = dict(zip(graph.inputs, self._inputs))
+        ids_in, pos_in = inputs_now.get("input_ids"), inputs_now.get("cache_position")
+        if CACHE_WINDOWS and ids_in is not None and pos_in is not None and ids_in.dim() == 2 and pos_in.dim() == 1:
+            rows_n, toks = ids_in.shape
+            writers = {}
+            for node in graph.nodes:
+                for i in node.writes:
+                    a = node.args[i] if i < len(node.args) else None
+                    if isinstance(a, dataflow.Ref) and a.kind == "resident":
+                        writers[a.name] = node.name
+            for (name, d2), replica in list(self.runner._copies.items()):
+                if name not in self.runner.state or name not in writers or d2.type != "cuda":
+                    continue
+                src = dataflow._attr(self.split, name)
+                if not (isinstance(src, torch.Tensor) and src.dim() >= 3 and src.shape[0] == rows_n
+                        and src.shape[1] > toks and replica.shape == src.shape):
+                    continue
+                owner = node_dev[writers[name]]
+                if owner == d2 or src.device != owner:
+                    continue
+                tail = tuple(src.shape[2:])
+                windows[(name, d2)] = {"writer": writers[name], "owner": owner, "src": src, "replica": replica,
+                                       "stage_src": torch.empty((rows_n, toks) + tail, dtype=src.dtype, device=owner),
+                                       "stage_dst": torch.empty((rows_n, toks) + tail, dtype=src.dtype, device=d2),
+                                       "scattered": False}
+                self.runner._fresh.add((name, d2))  # _arg's whole-cache refresh is replaced by the window
+        self.windows = len(windows)
+        self._windows = windows
+
+        def positions_on(d):
+            return in_copies.get(("cache_position", d), pos_in)
+
+        def window_index(w, d):
+            pos = positions_on(d).to(torch.int64)
+            idx = (pos[:, None] + torch.arange(toks, device=d)).clamp_(max=w["src"].shape[1] - 1)
+            return idx.reshape((rows_n, toks) + (1,) * len(w["src"].shape[2:])).expand((rows_n, toks) + tuple(w["src"].shape[2:]))
+
         for d in devs:
             g = torch.cuda.CUDAGraph(keep_graph=True)  # kept, to count its nodes (node_counts)
             with torch.cuda.device(d), torch.cuda.graph(g, stream=torch.cuda.Stream(device=d)):
@@ -715,6 +796,8 @@ class StepGraph(torch.nn.Module):
                         for (name, d3), copy in in_copies.items():
                             if d3 == d2:
                                 driver.memcpy(stream, copy, dict(zip(graph.inputs, self._inputs))[name])
+                                COPY_LOG.append(("input", name, str(d), str(d2), tuple(copy.shape), str(copy.dtype),
+                                                 copy.numel() * copy.element_size()))
                         if d2 in in_flags:
                             driver.write_value(stream, in_flags[d2].data_ptr(), 1)
                 elif d in in_flags:
@@ -736,6 +819,13 @@ class StepGraph(torch.nn.Module):
                         f = wflags[key]
                         driver.wait_value(s, f.data_ptr(), 1)
                         driver.write_value(s, f.data_ptr(), 0)
+                    for (wname, wd2), w in windows.items():  # the window of a shared cache lands in the replica
+                        if wd2 == d and not w["scattered"] and any(
+                                isinstance(r, dataflow.Ref) and r.kind == "resident" and r.name == wname
+                                for r in dataflow._flat(node.refs())):
+                            with torch.cuda.stream(s):
+                                w["replica"].scatter_(1, window_index(w, d), w["stage_dst"])
+                            w["scattered"] = True
                     with torch.cuda.stream(s):
                         args_ = [resolve(r, d) for r in node.args]
                         kwargs_ = {k: resolve(r, d) for k, r in node.kwargs.items()}
@@ -750,6 +840,17 @@ class StepGraph(torch.nn.Module):
                             out = self._capture_host_node(node, args_, kwargs_, d, stream, side, boxes, pooled, driver,
                                                           flags, flag, F, mailboxes, events)
                     produced[node.name] = out
+                    for (wname, wd2), w in windows.items():  # the step's slots of a shared cache, out to its replica
+                        if w["writer"] == node.name and w["owner"] == d:
+                            if s is not stream:
+                                ev_w = torch.cuda.Event()
+                                ev_w.record(s)
+                                stream.wait_event(ev_w)
+                            with torch.cuda.stream(stream):
+                                torch.gather(w["src"], 1, window_index(w, d), out=w["stage_src"])
+                            driver.memcpy(stream, w["stage_dst"], w["stage_src"])
+                            COPY_LOG.append(("window", wname, str(d), str(wd2), tuple(w["stage_src"].shape),
+                                             str(w["stage_src"].dtype), w["stage_src"].numel() * w["stage_src"].element_size()))
                     ended = []
                     for index, devices, _ in self.runner._fanout[node.name]:  # out to readers on other GPUs
                         value = out if index is None else out[index]
@@ -757,6 +858,8 @@ class StepGraph(torch.nn.Module):
                             d2 = reader_dev(node, d2)
                             if d2 != d and isinstance(value, torch.Tensor):
                                 driver.memcpy(s, self.runner.inboxes[(node.name, index, d2)], value)
+                                COPY_LOG.append(("value", f"{node.name}[{index}]", str(d), str(d2), tuple(value.shape),
+                                                 str(value.dtype), value.numel() * value.element_size()))
                                 key = xvalue_wave[(node.name, index, d2)]
                                 if last_producer[key] == node.name and key not in ended:
                                     ended.append(key)

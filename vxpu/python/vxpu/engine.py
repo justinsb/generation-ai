@@ -1961,6 +1961,9 @@ def _prefill_row(engine, state, request, row, row0_decodes, live=None):
             tensor[row].copy_(tensor[0])
             if kept is not None:
                 tensor[0].copy_(kept[fqn])
+    refresh = getattr(e._decode_split, "refresh_rows", None)
+    if refresh is not None:  # the shared caches' replicas on other GPUs take the rows the prefill wrote
+        refresh({0, row})
     request.prefill_ms = (time.perf_counter() - started) * 1e3
     return logits
 
