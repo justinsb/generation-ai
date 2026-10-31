@@ -737,8 +737,24 @@ the run set. The harness's single-batch lines agree with hero 8's (one
 row 13.4 ms, the drafter 25.4 ms at 2.37 tokens a step, 33 rows 30.1 /
 99.9 ms); a third pod, built identical to the second, read one row at
 13.3 ms (p10/p90 13/13, 1,316 kernels: the native fp8 body's 290
-activation-recoding launches included) on its first step. The boundary copies and the shared expert's split are
-in progress.
+activation-recoding launches included) on its first step. The boundary copies landed: the capture now records every copy the
+step makes between GPUs (`VXPU_STEP_COPIES=1` lists them), and at 33
+rows two of the 31 were 173 of 180 MB a step, layer 20's compressed KV
+cache and its index keys, copied whole from the third GPU to the fourth
+every step as the shared-state replica refresh. The replica now takes
+only the window of positions the step wrote, gathered on the owner and
+scattered on the reader inside the graph, with a prefill's rows
+refreshed whole once at admission; a replica-against-source check shows
+no differing position. Crossing traffic fell from 180 to 7.3 MB a step
+at 33 rows, the 24 copies from 3.27 ms to 0.14 ms, and the 33-row steps
+from 35.0 / 41.8 / 108.5 to 31.8 / 30.0 / 98.5 ms (one prompt / same /
+different), tokens identical. The shared expert's split landed as two
+ops with the front as an island, 12.6 ms at one row with the front on
+the parallel branch against 13.6 off, but the branch publishes or reads
+that island's output out of order when its consumer is not the next
+node (rows differ at nine rows), so the island is off by default until
+the capture orders it; that fix is in progress, as is a CPU selftest
+regression on segments with two outputs.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
