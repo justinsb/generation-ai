@@ -1,0 +1,32 @@
+Explain how a refrigerator keeps food cold, in simple terms.
+Write a short story about a lighthouse keeper who finds a message in a bottle.
+What are the main differences between TCP and UDP, and when would you use each?
+Give me a recipe for a vegetarian lasagna, with a shopping list.
+Summarize the causes and consequences of the French Revolution.
+Write a Python function that checks whether a string is a palindrome, and explain it.
+What should I consider when choosing a running shoe for marathon training?
+Describe the water cycle to a ten-year-old.
+How do vaccines train the immune system?
+Write a limerick about a cat who learns to code.
+What is the difference between weather and climate?
+Explain how a bicycle stays upright when it moves.
+Give three tips for writing clear emails at work.
+What were the main causes of the First World War?
+Describe how photosynthesis works in plants.
+Write a SQL query that finds the top five customers by total spending.
+How does compound interest work? Give an example.
+What should a beginner know before adopting a dog?
+Explain the rules of chess to a child.
+Summarize the plot of Romeo and Juliet in five sentences.
+How do noise-cancelling headphones work?
+What is a black hole, and how does one form?
+Write a short motivational speech for a soccer team at half time.
+Explain the difference between a virus and a bacterium.
+How do I make a good cup of pour-over coffee?
+What are the benefits and risks of nuclear power?
+Describe a typical day in the life of a Roman soldier.
+How does GPS determine your location?
+Write a thank-you note to a teacher who helped you.
+What is machine learning, in plain language?
+Explain why the sky is blue.
+Plan a simple weekly workout routine for a beginner.
