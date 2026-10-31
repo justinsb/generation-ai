@@ -585,6 +585,39 @@ accepts rows times what one row accepts. One stall survives: the first
 prompt of this fresh process read 30 ms flat for its 63 steps before the
 second read 13.6 steady; the step trace is the instrument for it.
 
+**Hero run 9's acceptance, agreed Oct 31.** Make all four GPUs stream at
+once: several batches in flight, one per layer range, so each GPU works
+on a different batch's layers while the others do the same, measured as
+aggregate tokens per second against the aggregate bandwidth of the four
+cards (5,840 GB/s) with per-batch latency alongside. The run proves or
+disproves three things: that the pipeline reaches a large fraction of
+the aggregate roofline without new hand fusion; that the planner
+produces this physical plan (the ranges, the pipeline depth, the
+schedule, as data) and its cost model predicts the aggregate within
+about 20% before the run; and that layer sharding is not a dead end for
+throughput against tensor parallelism inside a layer. Expectations,
+estimated from hero 8's table: four batches of 33 different prompts,
+pipelined with nothing else changed, about 1,300 tok/s (today 339 for
+one batch); with the two known losses fixed, the dense multiplications
+at 33 rows running at 60% of bandwidth (a native MXFP8 body, the run's
+one new template) and the 3.4 ms of state copies per boundary at 33
+rows, 2,000 to 3,000 tok/s, 20 to 30% of the aggregate floor; under
+1,500 is a failure to stop and understand. Four one-row batches should
+give about four times 75 tok/s at an unchanged 14 ms latency each; past
+about 17 ms the pipeline is interfering. Risks: the host side (four
+steps' worth of host nodes and crossings per step time; the step trace
+is on from day one), GPU memory for four batches' caches and inboxes,
+cross-batch correctness (the same-prompt check per batch from the first
+run), and range balance (the ranges were chosen for memory, not equal
+work). The acceptance table: four batches of 33 different prompts, four
+of 33 same prompts, four of one row, plus hero 8's one-row and drafter
+lines unchanged, each against its floor and against the six-card
+recipe's 494 tok/s at 24 streams. Workstreams from day one: the pipeline
+in the step graph and native loop; the native MXFP8 dense body; the
+boundary copies; the planner's pipeline cost model and plan output; the
+aggregate measurement harness; and, riding along, the shared expert's
+split for the one-row overlap and the first-prompt stall.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
