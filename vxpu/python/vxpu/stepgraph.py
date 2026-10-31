@@ -508,7 +508,6 @@ class StepGraph(torch.nn.Module):
         if EXPERT_STATS:  # the distinct-expert counters, allocated before any capture (see _count_experts)
             self._expert_counts = {d: torch.zeros(EXPERT_STATS_LAYERS, dtype=torch.int64, device=d) for d in devs}
         answers = self._answers(host_nodes, boxes, pooled, external)  # before any capture: builds packages
-<<<<<<< HEAD
         # the expert kernels' arrival counters belong to these graphs (triton_ops._fp4_counters):
         # another step graph in flight gets its own. They are made by the warm-up, outside any
         # capture: a buffer made inside one is a memset node on the capture stream, unordered
@@ -524,11 +523,6 @@ class StepGraph(torch.nn.Module):
             triton_ops.FP4_COUNTER_SCOPE = None
             triton_ops.fp4_counter_scope_end(scope)
         self._keep = self._keep + (scope,)
-=======
-        self._warm(pooled, runner, inputs, node_dev)
-        torch.cuda.synchronize()
-        self._capture_all(graph, mailboxes, boxes, pooled, peers, driver, flags, F, flag, sides, dev, devs, node_dev,
-                          in_copies, resolve, produced, host_nodes, answers)
         if COPY_LOG:  # what the step moves between GPUs: the bytes a crossing costs
             total = sum(c[-1] for c in COPY_LOG)
             big = sorted(COPY_LOG, key=lambda c: -c[-1])[:6]
@@ -551,7 +545,6 @@ class StepGraph(torch.nn.Module):
                 w["replica"][row].copy_(w["src"][row])
         for d in {w["replica"].device for w in windows.values()} | {w["src"].device for w in windows.values()}:
             torch.cuda.synchronize(d)
->>>>>>> h9-copies
 
     def _warm(self, pooled, runner, inputs, node_dev):
         """Every kernel the captures will launch, run once first on the
