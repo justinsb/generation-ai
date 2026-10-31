@@ -687,6 +687,34 @@ split has a shorter slowest range than the current one, so the
 imbalance is the model's to carry, not a placement to fix; a fifth GPU
 or a cut inside a KV group would change it.
 
+**Hero run 9, first results (Oct 31, afternoon; measured on four RTX PRO
+6000, four batches in flight, each batch the same prompts; the planner's
+predictions were written before the runs).** `generate_rows(batches=N)`
+runs N batches at once: each batch has its own state, its own step
+graphs and its own native loop on its own streams per GPU, and a batch's
+range k waits only on its own range k-1, so the GPUs run different
+batches' ranges at the same time with no host scheduler.
+
+| four batches of | per-batch latency | aggregate | predicted | one batch alone |
+|---|---|---|---|---|
+| 1 row | 14.3 to 14.7 ms | 244 tok/s | 259 at 15.5 ms | 75 tok/s at 13.6 ms |
+| 33 rows, same prompt | 32.8 to 46.0 ms | 3,224 tok/s | 3,394 at 38.9 | 1,021 at 32.8 |
+| 33 rows, different prompts | 100 to 118 ms | 1,182 tok/s | 1,243 at 106 | 339 at 99 |
+
+Every batch's tokens equal the single-batch run's and each other's. The
+cost model's prediction is within 6% on every aggregate, which passes
+the 20% test the run set; the per-range spans (19 / 29 / 30 / 24 ms with
+different prompts) show the two middle ranges setting the period as the
+model said, with the first GPU idling more than modelled (35 to 45%).
+Two things had to stop being shared between steps in flight: the direct
+expert kernels' arrival counters (one buffer per GPU; three of four
+batches drifted to other tokens until each step graph got its own), and
+the cost measurement's placement of a real weight under sharding. The
+native MXFP8 body for the dense multiplications is merged alongside
+(33 rows: the wide multiplication 49 to 33 µs, 92% of bandwidth) and is
+not yet in these numbers; the boundary copies and the shared expert's
+split are in progress.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
