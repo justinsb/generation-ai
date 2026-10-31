@@ -735,7 +735,9 @@ row 234 tok/s at 13.9 to 14.3 ms; so the same-prompt case sits 7% above
 its prediction and the other two 10 to 13% below, all inside the 20%
 the run set. The harness's single-batch lines agree with hero 8's (one
 row 13.4 ms, the drafter 25.4 ms at 2.37 tokens a step, 33 rows 30.1 /
-99.9 ms). The boundary copies and the shared expert's split are
+99.9 ms); a third pod, built identical to the second, read one row at
+13.3 ms (p10/p90 13/13, 1,316 kernels: the native fp8 body's 290
+activation-recoding launches included) on its first step. The boundary copies and the shared expert's split are
 in progress.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
