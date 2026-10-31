@@ -1961,8 +1961,16 @@ def _prefill_row(engine, state, request, row, row0_decodes, live=None):
             tensor[row].copy_(tensor[0])
             if kept is not None:
                 tensor[0].copy_(kept[fqn])
-    refresh = getattr(e._decode_split, "refresh_rows", None)
-    if refresh is not None:  # the shared caches' replicas on other GPUs take the rows the prefill wrote
+    # the shared caches' replicas on other GPUs take the rows the prefill wrote: on the step graph
+    # of the batch that owns this state (a batch in flight has its own state and graphs; the
+    # engine's own graph is batch 0's)
+    graph = e._decode_split
+    for st, g in getattr(e, "_pipeline_graphs", []):
+        if st is state:
+            graph = g
+            break
+    refresh = getattr(graph, "refresh_rows", None)
+    if refresh is not None:
         refresh({0, row})
     request.prefill_ms = (time.perf_counter() - started) * 1e3
     return logits
