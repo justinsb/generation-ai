@@ -1,0 +1,116 @@
+{
+ "source": "vxpu plan pipeline (vxpu-big b795382's planner), run on the laptop against the artifacts' bindings; distinct experts a layer given as measured (6 at one row or the same prompt, 37 for 9 different prompts, 100 for 33, 30 with the drafter)",
+ "cases": [
+  {
+   "rows": 1,
+   "mode": "one",
+   "batches": 1,
+   "command": "plan pipeline --artifact rows11-b1 --batches 1 --rows 1 --distinct 6",
+   "predicted_aggregate_tokens_per_s": 73,
+   "predicted_slot_ms": 13.6,
+   "predicted_latency_ms": 13.6,
+   "predicted_single_ms": 13.6,
+   "ceiling_tokens_per_s": 406
+  },
+  {
+   "rows": 1,
+   "mode": "one",
+   "batches": 4,
+   "command": "plan pipeline --artifact rows11-b1 --batches 4 --rows 1 --distinct 6",
+   "predicted_aggregate_tokens_per_s": 259,
+   "predicted_slot_ms": 3.9,
+   "predicted_latency_ms": 15.5,
+   "predicted_single_ms": 13.6,
+   "ceiling_tokens_per_s": 406
+  },
+  {
+   "rows": 33,
+   "mode": "same",
+   "batches": 1,
+   "command": "plan pipeline --artifact rows11-b33 --batches 1 --rows 33 --distinct 6",
+   "predicted_aggregate_tokens_per_s": 982,
+   "predicted_slot_ms": 33.6,
+   "predicted_latency_ms": 33.6,
+   "predicted_single_ms": 33.6,
+   "ceiling_tokens_per_s": 13391
+  },
+  {
+   "rows": 33,
+   "mode": "same",
+   "batches": 4,
+   "command": "plan pipeline --artifact rows11-b33 --batches 4 --rows 33 --distinct 6",
+   "predicted_aggregate_tokens_per_s": 3346,
+   "predicted_slot_ms": 9.9,
+   "predicted_latency_ms": 39.4,
+   "predicted_single_ms": 33.6,
+   "ceiling_tokens_per_s": 13391
+  },
+  {
+   "rows": 33,
+   "mode": "different",
+   "batches": 1,
+   "command": "plan pipeline --artifact rows11-b33 --batches 1 --rows 33 --distinct 100",
+   "predicted_aggregate_tokens_per_s": 370,
+   "predicted_slot_ms": 89.3,
+   "predicted_latency_ms": 89.3,
+   "predicted_single_ms": 89.3,
+   "ceiling_tokens_per_s": 1943
+  },
+  {
+   "rows": 33,
+   "mode": "different",
+   "batches": 4,
+   "command": "plan pipeline --artifact rows11-b33 --batches 4 --rows 33 --distinct 100",
+   "predicted_aggregate_tokens_per_s": 1243,
+   "predicted_slot_ms": 26.6,
+   "predicted_latency_ms": 106.2,
+   "predicted_single_ms": 89.3,
+   "ceiling_tokens_per_s": 1943
+  },
+  {
+   "rows": 9,
+   "mode": "same",
+   "batches": 1,
+   "command": "plan pipeline --artifact rows11-b9 --batches 1 --rows 9 --distinct 6",
+   "predicted_aggregate_tokens_per_s": 474,
+   "predicted_slot_ms": 19.0,
+   "predicted_latency_ms": 19.0,
+   "predicted_single_ms": 19.0,
+   "ceiling_tokens_per_s": 3652
+  },
+  {
+   "rows": 9,
+   "mode": "different",
+   "batches": 1,
+   "command": "plan pipeline --artifact rows11-b9 --batches 1 --rows 9 --distinct 37",
+   "predicted_aggregate_tokens_per_s": 241,
+   "predicted_slot_ms": 37.3,
+   "predicted_latency_ms": 37.3,
+   "predicted_single_ms": 37.3,
+   "ceiling_tokens_per_s": 1242
+  },
+  {
+   "rows": 1,
+   "mode": "one+drafter",
+   "batches": 1,
+   "command": "plan pipeline --artifact specm5-b1 --batches 1 --rows 1 --distinct 30 --drafter",
+   "predicted_aggregate_tokens_per_s": 36,
+   "predicted_slot_ms": 27.6,
+   "predicted_latency_ms": 27.6,
+   "predicted_single_ms": 27.6,
+   "ceiling_tokens_per_s": 153
+  },
+  {
+   "rows": 1,
+   "mode": "one+drafter",
+   "batches": 4,
+   "command": "plan pipeline --artifact specm5-b1 --batches 4 --rows 1 --distinct 30 --drafter",
+   "predicted_aggregate_tokens_per_s": 129,
+   "predicted_slot_ms": 7.7,
+   "predicted_latency_ms": 31.0,
+   "predicted_single_ms": 27.6,
+   "ceiling_tokens_per_s": 153
+  }
+ ],
+ "note": "The drafter cases' predicted tokens per second count one token a step (the planner's pipeline model does not yet include accepted drafts); multiply by the measured tokens a step (2.67 at one row) to compare. The ceiling is a batch's rows over the slowest range's bytes at one GPU's bandwidth."
+}
