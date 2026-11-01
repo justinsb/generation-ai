@@ -375,19 +375,22 @@ class StepGraph(torch.nn.Module):
         input buffers and each row's sampling settings into the graph's (choose), replays the graphs
         and reads the chosen tokens back. With `draft` (the drafter's captured StepGraph), each step
         first runs the drafter, verifies its tokens in this step and keeps those the choices agree
-        with."""
-        inputs, chosen, execs, streams, devices, host, flags = self.native_parts(streams)
+        with. `streams` (see native_parts) launches this step's graphs and the drafter's on those
+        streams: a batch in flight runs its drafter on its own streams as well, ahead of its
+        verify on the same stream of the drafter's GPU."""
+        own = streams
+        inputs, chosen, execs, streams, devices, host, flags = self.native_parts(own)
         if self._chosen is None or sorted(inputs) != ["cache_position", "input_ids"]:
             raise RuntimeError(f"native loop: a decode step of logits from input_ids and cache_position, not {sorted(inputs)}")
         out_graph = devices.index(chosen.device.index) if chosen.device.index in devices else 0
         _check_flat(inputs, chosen, "decode")
         if draft is not None:
-            _check_flat(*draft.native_parts()[:2], "draft")
+            _check_flat(*draft.native_parts(own)[:2], "draft")
         loop = kernels.load().DecodeLoop(inputs["input_ids"], inputs["cache_position"], chosen, execs, streams, devices,
                                          host, flags, out_graph)
         loop.set_sampling(*self._sampling)
         if draft is not None:
-            d_inputs, d_out, d_execs, d_streams, d_devices, d_host, d_flags = draft.native_parts()
+            d_inputs, d_out, d_execs, d_streams, d_devices, d_host, d_flags = draft.native_parts(own)
             # the drafter's tokens into this step's input ids on the GPU: a graph of one copy per
             # row (ids[i, 1:S] <- out[i, :S-1], contiguous slices, across GPUs if the drafter
             # lives on another), run by the loop on the verify's stream after an event on the

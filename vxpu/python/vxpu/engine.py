@@ -1519,8 +1519,8 @@ class Engine:
             self._check_prompt(request.prompt)
         waiting = sorted(range(len(prompts)), key=lambda i: arrivals[i])
         if batches > 1:
-            if telemetry or not all(self._native_rows(r.sampler) for r in requests) or self.step_tokens > 1:
-                raise ValueError("batches in flight need the captured step graph's native loop, one token a step, "
+            if telemetry or not all(self._native_rows(r.sampler) for r in requests):
+                raise ValueError("batches in flight need the captured step graph's native loop, "
                                  "no telemetry and no repetition penalty")
             return self._generate_rows_pipeline(requests, waiting, arrivals, batches, batch_of)
         if not telemetry and all(self._native_rows(r.sampler) for r in requests):
@@ -1591,8 +1591,8 @@ class Engine:
     def generate_batches(self, prompt_lists, max_new_tokens, params):
         """generate_rows with one batch per list in `prompt_lists`, all in flight at once (the
         pipeline across the layer ranges), returning one result dict per batch: that batch's
-        token_ids and prefill_ms, its own step_ms, and the run's drafted and accepted counts
-        split evenly (the loops count them together). The measurement harness
+        token_ids and prefill_ms, its own step_ms, and its own drafted and accepted counts (each
+        batch drafts and verifies on its own loop). The measurement harness
         (dev/hero/batches.py) calls this; a driver that wants every field at once calls
         generate_rows(batches=N, batch_of=...) itself."""
         prompts, batch_of = [], []
@@ -1603,12 +1603,11 @@ class Engine:
         out = self.generate_rows(prompts, max_new_tokens, params, batches=len(prompt_lists), batch_of=batch_of)
         ended = time.time()
         results, at = [], 0
-        n = max(1, len(prompt_lists))
         for b, lst in enumerate(prompt_lists):
             k = len(lst)
             results.append({"token_ids": out["token_ids"][at:at + k], "prefill_ms": out["prefill_ms"][at:at + k],
                             "step_ms": list(out["batch_step_ms"][b]), "rows_active": [k] * len(out["batch_step_ms"][b]),
-                            "drafted": out.get("drafted", 0) // n, "accepted": out.get("accepted", 0) // n,
+                            "drafted": out["batch_drafted"][b], "accepted": out["batch_accepted"][b],
                             "native": True, "start": started, "end": ended})
             at += k
         return results
@@ -1616,9 +1615,11 @@ class Engine:
     def _generate_rows_pipeline(self, requests, waiting, arrivals, batches, batch_of=None):
         """generate_rows with `batches` batches in flight (_PipelineRows): batch b holds its own
         state and captured step graphs and decodes on a native loop of its own, on streams of its
-        own, so the GPUs work on different batches' layer ranges at once. Prompt i, in arrival
-        order, goes to batch i // rows. Returns, besides generate_rows' fields, "batch_step_ms":
-        each batch's step times, and "batch_rows": each prompt's batch."""
+        own, so the GPUs work on different batches' layer ranges at once. With a drafter, each
+        batch drafts and verifies on its own. Prompt i, in arrival order, goes to batch i // rows.
+        Returns, besides generate_rows' fields, "batch_step_ms": each batch's step times,
+        "batch_rows": each prompt's batch, and "batch_drafted" and "batch_accepted": each
+        batch's own counts (drafted and accepted are their sums)."""
         with self._lock:
             rows = _PipelineRows(self, batches)
             per_row = rows.rows
@@ -1643,6 +1644,7 @@ class Engine:
                                 row = rows.free_row(b)
                         rows.pump(0.001 if (waiting or progressed) else 0.02)
                 steps = [loop.take_steps() for loop in rows.loops]
+                drafts = [loop.drafts() for loop in rows.loops]
             finally:
                 rows.close()
         flat = [ms for per in steps for ms, _ in per]
@@ -1650,7 +1652,9 @@ class Engine:
                 "step_ms": flat, "rows_active": [n for per in steps for _, n in per if n],
                 "batch_step_ms": [[ms for ms, _ in per] for per in steps],
                 "batch_rows": [assigned[i] for i in range(len(requests))],
-                "drafted": 0, "accepted": 0, "native": True, "batches": batches}
+                "batch_drafted": [d for d, _ in drafts], "batch_accepted": [a for _, a in drafts],
+                "drafted": sum(d for d, _ in drafts), "accepted": sum(a for _, a in drafts),
+                "native": True, "batches": batches}
 
     def _rebind(self, state):
         """Point the split programs' state buffers (the decode split and the prefill split, which
@@ -1698,6 +1702,35 @@ class Engine:
         values = self._zero_inputs(runner)
         for _ in range(2):  # the first step eager (the inboxes allocated), the second captured
             graph(**values)
+        return graph
+
+    def _pipeline_draft(self, state):
+        """The drafter's captured step graph bound to `state`, made as _pipeline_graph makes the
+        decode's: a batch in flight drafts and verifies on its own, so its loop needs a drafter
+        reading and writing its own caches (the drafter's split is one of the programs _rebind
+        re-points). None when the engine has no captured drafter."""
+        from . import dataflow
+        from .stepgraph import StepGraph
+        main = self._draft_run
+        if not isinstance(main, StepGraph) or main.graph is None:
+            return None
+        self._rebind(state)
+        runner = dataflow.Runner(main.split, *main.vxpu_segments, device=self.device,
+                                 graph=self._graph(main.split) if self.plan["layer_devices"] else None)
+        runner.state = set(self.binding["state"])
+        if self.plan["layer_devices"]:
+            runner.place(self._host_placement(runner.graph, "draft"))
+        # captured with the drafter's GPU current: the step's inputs and its one graph live
+        # there, with nothing copied in from the engine's GPU (the capture takes the current
+        # device as the step's own, and the engine's drafter was captured on the engine's)
+        devices = {self._layer_device(max(int(x) for x in n.layers)) for n in runner.graph.nodes if n.layers}
+        devices.discard(None)
+        current = devices.pop() if len(devices) == 1 else self.device
+        graph = StepGraph(runner, plan=self.plan, role="draft")
+        with torch.cuda.device(current):
+            values = self._zero_inputs(runner)
+            for _ in range(2):
+                graph(**values)
         return graph
 
     def _check_prompt(self, prompt):
@@ -1964,14 +1997,15 @@ def _prefill_row(engine, state, request, row, row0_decodes, live=None):
     # the shared caches' replicas on other GPUs take the rows the prefill wrote: on the step graph
     # of the batch that owns this state (a batch in flight has its own state and graphs; the
     # engine's own graph is batch 0's)
-    graph = e._decode_split
-    for st, g in getattr(e, "_pipeline_graphs", []):
-        if st is state:
-            graph = g
+    graphs = [e._decode_split, e._draft_run]
+    for entry in getattr(e, "_pipeline_graphs", []):  # (state, decode graph, drafter graph or None)
+        if entry[0] is state:
+            graphs = list(entry[1:])
             break
-    refresh = getattr(graph, "refresh_rows", None)
-    if refresh is not None:
-        refresh({0, row})
+    for graph in graphs:
+        refresh = getattr(graph, "refresh_rows", None)
+        if refresh is not None:
+            refresh({0, row})
     request.prefill_ms = (time.perf_counter() - started) * 1e3
     return logits
 
@@ -2158,7 +2192,10 @@ class _PipelineRows:
     the layers sharded, the GPUs then run different batches' ranges at once, a batch's graph on
     GPU k waiting (a stream memory wait) for its own range k-1 while another batch's range k runs.
     Python admits requests between a batch's steps (that batch's loop paused for the prefill,
-    the others stepping) and hands the emitted tokens to their requests."""
+    the others stepping) and hands the emitted tokens to their requests. With a drafter (steps of
+    several tokens), each batch has a drafter step graph of its own too, captured against its
+    state (Engine._pipeline_draft), and its loop drafts, verifies and counts acceptance on its
+    own: batch 0 on the engine's drafter, the others on theirs."""
 
     FINISH = {1: "eos", 2: "length"}
 
@@ -2171,6 +2208,7 @@ class _PipelineRows:
             raise RuntimeError("batches in flight need the resident state of a split decode")
         self.states = [e._resident]
         self.graphs = [e._decode_split]
+        self.drafts = [e._draft_run if e.step_tokens > 1 else None]
         self.loops = []
         self.requests = [{} for _ in range(batches)]
         self._streams = []
@@ -2180,27 +2218,31 @@ class _PipelineRows:
         it): the other batches' states and step graphs, then a loop per batch."""
         e = self.engine
         started = time.perf_counter()
-        cache = e.__dict__.setdefault("_pipeline_graphs", [])  # (state, graph) per extra batch, kept across calls
+        cache = e.__dict__.setdefault("_pipeline_graphs", [])  # (state, graph, drafter) per extra batch, kept across calls
         built = 0
         for b in range(1, self.n):
             if len(cache) < b:
                 state = {fqn: torch.zeros_like(t) for fqn, t in e._resident.items()}
-                cache.append((state, e._pipeline_graph(state)))
+                graph = e._pipeline_graph(state)
+                cache.append((state, graph, e._pipeline_draft(state) if e.step_tokens > 1 else None))
                 built += 1
-            state, graph = cache[b - 1]
+            state, graph, draft = cache[b - 1]
             self.states.append(state)
             self.graphs.append(graph)
+            self.drafts.append(draft)
         nbytes = sum(t.numel() * t.element_size() for t in e._resident.values())
         print(f"[vxpu] batches in flight: {self.n}, each {self.rows} rows; state {nbytes / 1e9:.2f} GB a batch; "
               f"{built} more step graphs captured in {time.perf_counter() - started:.1f} s", flush=True)
         trace = os.environ.get("VXPU_STEP_TRACE")
-        for b, graph in enumerate(self.graphs):
-            devices = graph.native_parts()[4]
-            streams = {d: torch.cuda.Stream(device=d) for d in devices}
+        for b, (graph, draft) in enumerate(zip(self.graphs, self.drafts)):
+            devices = set(graph.native_parts()[4])
+            if draft is not None:  # the batch's drafter launches on the batch's streams too
+                devices |= set(draft.native_parts()[4])
+            streams = {d: torch.cuda.Stream(device=d) for d in sorted(devices)}
             self._streams.append(streams)
             if trace:  # the step trace per batch: the loop opens its file when it is made
                 os.environ["VXPU_STEP_TRACE"] = f"{trace}.b{b}"
-            self.loops.append(graph.native_loop(draft=None, streams=streams))
+            self.loops.append(graph.native_loop(draft=draft, streams=streams))
         if trace:
             os.environ["VXPU_STEP_TRACE"] = trace
         e._current = {"id": "pipeline", "state": self.states[0]}
