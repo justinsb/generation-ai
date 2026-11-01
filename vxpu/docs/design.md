@@ -1263,6 +1263,64 @@ layer of this size, and the next step is one launch a layer (gate/up and
 down phases in one persistent kernel with a per-pair arrival count), which
 is worth the ramp and tail of 40 launches, about 0.1 ms a step, and the
 overlap of the two phases' tails.
+**Hero run 11, the tail (Nov 1, night): the floor of a launch, and what
+folding the small kernels costs.** The one-row step launches 876 kernels
+under 5 µs (fronts, row finishes, the MXFP8 recode, the gate's and
+indexer's pieces), 1.48 ms of the 12.7 ms of GPU time. Their floor on an
+RTX PRO 6000, measured inside one CUDA graph (`dev/hero/launch_floor.py`):
+0.75 µs per dependent one-element kernel, 0.69 per memset node or fill
+kernel, 1.47 per one-program kernel over a 32 KB row (4.8 for three in a
+chain), 0.97 per 32 KB copy. So the tail sits at its floor already (0.66
+to 1.3 ms for 876 nodes, whatever they compute) and only fewer nodes
+helps. Two folds were built and measured, each against the split it
+replaces, bitwise-identical outputs in both:
+- The front's statistics kernel folded into its dots kernel, every
+  program computing the row's two norm statistics itself (the row's 32 KB
+  of stream from L2 per program, 192 to 384 programs a site). Slower in
+  every configuration of a 3 x 2 x 3 sweep (how the row is read, warps,
+  experts per program): hc_front 5.4 µs against the split's 4.3 at one
+  row, ffn_front 9.1 against 7.7; at nine rows 12 to 16 against 7.7 and
+  19.1 against 16.6. Reading the row again in every program costs more
+  than the 0.75 to 1.5 µs launch it removes. Dropped.
+- window_kv's row finish (the sum of its split-K partials, the norm, the
+  rotary, the quantization: `_row_post_kernel`, 39 launches a step)
+  folded into its GEMV: every program adds one to an arrival counter
+  after its store and the last to arrive finishes every row
+  (`FOLD_POST`, off by default). The counter must be zero at every step,
+  and no kernel may own a global for it (two batches in flight on one GPU
+  replay the same package, as the expert kernels' counters showed in hero
+  run 9), so the lowering now gives a segment one zeros (an intermediate
+  of the compiled segment, so every captured graph owns its own), sliced
+  per site that declares `Impl.counters`, and traced as one more input of
+  the inlined body (`lower._Scratch`, tested without a GPU). Measured
+  eagerly on the real shapes (x [rows, 4096] to kv [rows, 576], split-K
+  16): at one row 7.1 µs against 7.2 for the pair (the fill launch
+  included; without it, 0.8 µs saved), at nine rows 22.8 against 8.2 and
+  at 33 rows 62 against 12, because the one finishing program does
+  serially what the separate kernel's programs did in parallel. A variant
+  where every program waits at the counter and then finishes every P-th
+  row ran 8.0 and 9.4 µs at one and nine rows (the wait costs what the
+  launch saved) and hung at 33 rows: the GEMV's 576 programs are not all
+  resident at that row count, and a program waiting for one not yet
+  scheduled never finishes. In the lowered step (pod C, the pinned kernel table,
+VXPU_FOLD_POST=1 against 0 on the same tree): one row 13.2 ms against
+13.2, nine rows 21.1 / 17.0 / 34.2 against 21.2 / 17.0 / 34.3 (one
+prompt, nine of one prompt, nine prompts), tokens identical; and 47 more
+kernels a step, not 39 fewer, because the compiler fused the segment's
+zeros into a fill-and-slice kernel per site (40 of 1.1 µs) instead of
+keeping one fill per segment, so the fold's first use pays a node to
+save a node. Passing the scratch whole with an offset, not a slice,
+takes that back; it is the next edit to the mechanism.
+What this says for the tail: a finish that follows a split reduction
+cannot join its producer without either serializing the rows or a
+grid-wide wait, and neither pays on this card; the per-segment counters
+are the right mechanism for the folds that do pay (a finish of one row's
+worth of work, or one fill shared by several finishes in a segment), and
+they stay in the tree for that. The remaining lever on the 1.48 ms is
+fewer sites, not fewer kernels per site: the MXFP8 recode written once by
+its producer (284 launches; the GEMV workstream's), and the fork's
+per-layer glue the compiler emits around the gate and the indexer (197
+launches, 0.49 ms; the indexer's top-k is #484).
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's

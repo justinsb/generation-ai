@@ -1025,11 +1025,12 @@ def _window_kv_fused(x, wkv, scale, norm_weight, norm_eps, freqs_table, start, s
                 "finished (norm, rotary, quantization) by one program per row",
                 applies=lambda plan, rows=0, dim=0, kv_dim=0, rope_dim=0, **_: plan["triton"]
                 and rows <= FP8_GEMV_MAX_ROWS and dim % 32 == 0 and kv_dim % 32 == 0
-                and rope_dim % 2 == 0 and _fp8_native(), lowerable=True)
+                and rope_dim % 2 == 0 and _fp8_native(), lowerable=True,
+                counters=lambda **_: 1 if triton_ops._fold_post_on() else 0)
 def _window_kv_triton(x, wkv, scale, norm_weight, norm_eps, freqs_table, start, seqlen, rope_dim, quantized,
-                      tk=triton_ops):
+                      tk=triton_ops, counters=None):
     return tk.window_kv(x, wkv, scale, norm_weight, norm_eps, _freqs_real(freqs_table), start, seqlen, rope_dim,
-                        quantized)
+                        quantized, counters=counters)
 
 
 @implementation("vxpu::window_kv", "reference", ("cpu", "cuda"), "bit-identical",

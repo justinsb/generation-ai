@@ -195,9 +195,6 @@ class SiteBytes(unittest.TestCase):
         self.assertEqual(lower.site_bytes(gm, out), {"weights": 64, "activations": 16 + 16, "state": 0})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class NoiseBandTest(unittest.TestCase):
     """A fused body displaces the kernel only when it wins by more than the measurement's noise."""
@@ -219,3 +216,39 @@ class NoiseBandTest(unittest.TestCase):
         self.assertEqual(chosen, "gpu-triton")
         chosen, _ = costs.decide({"gpu-fused": 0.9, "gpu-triton": 3.0}, {"gpu-fused": 0.0}, "gpu-triton")
         self.assertEqual(chosen, "gpu-fused")
+class ScratchCounters(unittest.TestCase):
+    """A segment's arrival counters (hero run 11): one zeros per segment graph
+    and GPU, sized to every site's request at the end, each site inlined with
+    its own slice as an extra input (Impl.counters); the body's result is
+    computed from that input, and a CPU run of the inlined graph sees zeros."""
+
+    def test_one_zeros_per_segment_sliced_per_site(self):
+        def body(x, counters=None):
+            return x * 2 + counters.sum().to(x.dtype)
+
+        with FakeTensorMode():
+            x = torch.empty(2, 4, dtype=torch.float32, device="cpu")
+        gm = make_fx(lambda a: ((a * 1) + 1, (a * 1) + 2), tracing_mode="fake")(x)
+        muls = [n for n in gm.graph.nodes if n.op == "call_function" and "mul" in str(n.target)]
+        self.assertEqual(len(muls), 2)
+        scratch = lower._Scratch()
+        for node, n in zip(muls, (1, 3)):
+            counters = (n, scratch.take(gm, node, n, torch.device("cpu")))
+            lower._inline(gm, node, body, (x,), counters=counters)
+        scratch.close()
+        zeros = [n for n in gm.graph.nodes if n.op == "call_function" and n.target is torch.zeros]
+        self.assertEqual(len(zeros), 1, "one zeros per segment and device")
+        self.assertEqual(zeros[0].args, ([4],))
+        self.assertEqual(zeros[0].kwargs["dtype"], torch.int32)
+        slices = [n for n in gm.graph.nodes if n.op == "call_function" and n.target is torch.ops.aten.slice.Tensor]
+        self.assertEqual([(n.args[2], n.args[3]) for n in slices], [(0, 1), (1, 4)])
+        gm.graph.lint()
+        gm.recompile()
+        a = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        out = gm(a)
+        torch.testing.assert_close(out[0], a * 2 + 1)
+        torch.testing.assert_close(out[1], a * 2 + 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

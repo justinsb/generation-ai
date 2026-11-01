@@ -60,9 +60,9 @@ this module.
 
 import contextlib
 import functools
-import types
-
 import os
+import types
+import typing
 
 import torch
 
@@ -162,6 +162,31 @@ if triton is not None:
         inv = ((254 - exponent) << 23).to(tl.float32, bitcast=True)
         q = tl.minimum(tl.maximum(tl.reshape(xg * inv[:, :, None], (BM, BK)), -448.0), 448.0)
         return q.to(tl.float8e4nv), exponent.to(tl.uint8)
+
+
+# Counters a step's kernels arrive on (hero run 11): a kernel whose last program finishes a
+# cross-program reduction (window_kv's row norm, rotary and quantization after its split-K GEMV)
+# counts its programs' arrivals in an int32 that must be zero when the kernel starts. The caller
+# provides it: under the lowering a slice of the segment's scratch (one zeros per segment graph,
+# so every captured graph owns its counters and two batches in flight on one GPU cannot share
+# one, as the expert kernels' did in hero run 9); eagerly, zeros of the call's own.
+FOLD_POST = os.environ.get("VXPU_FOLD_POST")  # "1": window_kv's row finish runs in its GEMV's last program (knob FOLD_POST)
+FOLD_POST_RB = 1  # rows the finishing program handles at a time
+
+
+def _fold_post_on():
+    """Whether window_kv's finish is folded into its GEMV (FOLD_POST; VXPU_FOLD_POST=1 is the A/B)."""
+    return FOLD_POST in (True, "1")
+
+
+def step_counters(n, device, given=None):
+    """n int32 counters at zero for one kernel call: `given` (the lowering's scratch slice) when
+    the caller has them, else zeros of this call's own (a fill launch)."""
+    if given is not None:
+        if given.numel() < n or given.dtype != torch.int32:
+            raise ValueError(f"step_counters: {n} int32 wanted, {tuple(given.shape)} {given.dtype} given")
+        return given
+    return torch.zeros(n, dtype=torch.int32, device=device)
 
 
 MXFP8_NATIVE = os.environ.get("VXPU_MXFP8_NATIVE")  # override: force the native (1) or converting (0) GEMV body (A/B)
@@ -440,10 +465,12 @@ if triton is not None:
 if triton is not None:
     @triton.jit
     def _gemv_rows_kernel(x_ptr, xq_ptr, xe_ptr, w_ptr, s_ptr, y_ptr, res_ptr, post_ptr, comb_ptr, add_ptr, M, N, K, XS, R, KS,
+                          cnt_ptr, nw_ptr, freqs_ptr, start_ptr, out_ptr, S, eps,
                           HAS_SCALE: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
                           EPI_QUANT: tl.constexpr = False, KSPLIT: tl.constexpr = 1, EPI_HC: tl.constexpr = 0,
                           HAS_ADD: tl.constexpr = False, NATIVE: tl.constexpr = False,
-                          RECODE: tl.constexpr = False):
+                          RECODE: tl.constexpr = False, POST: tl.constexpr = False, RD: tl.constexpr = 0,
+                          PBD: tl.constexpr = 0, RB: tl.constexpr = 8):
         """x [M, K] (bf16) times weight [N, K] transposed, every row of x by one pass over the
         weight: a program owns BN weight rows, streams them once, and multiplies each tile by all
         M rows of x on the tensor cores (tl.dot, bf16 in, fp32 accumulation; an fp8 weight times
@@ -464,8 +491,15 @@ if triton is not None:
         bf16 output x (with HAS_ADD, x = bf16(add + x) first: the experts' fp32 sum plus the
         shared expert, as forward_routed adds them) is expanded back to the hc copies of the
         stream, out[m, h, n] = post[m, h] * x[m, n] + sum_k comb[m, k, h] * residual[m, k, n],
-        in fp32 and stored as bf16 in y [M, hc, N]; the sum runs over k first, as torch's does."""
+        in fp32 and stored as bf16 in y [M, hc, N]; the sum runs over k first, as torch's does.
+        With POST (window_kv's finish, hero run 11), after its store every program adds one to
+        cnt_ptr[0] and the one that arrives last sums the KSPLIT partials of every row and
+        finishes it (_rows_finish: norm with nw_ptr, the rotary of the last RD elements at the
+        row's position, the fp8-grid quantization) into out_ptr [M, N] bf16: the row_post launch
+        that followed this kernel runs inside it. cnt_ptr[0] must be zero at the launch
+        (step_counters)."""
         pid = tl.program_id(0)
+        ybase = y_ptr
         rows = pid.to(tl.int64) * BN + tl.arange(0, BN)  # int64: weights past 2^31 elements
         live = rows < N
         g = (pid * BN) // R  # BN divides R: one group per program
@@ -534,6 +568,58 @@ if triton is not None:
                 y_ptr += tl.program_id(1).to(tl.int64) * M * N
             tl.store(y_ptr + ms[None, :] * N + rows[:, None], acc.to(y_ptr.dtype.element_ty),
                      mask=live[:, None] & mlive[None, :])
+            if POST:
+                tl.debug_barrier()  # every thread's partials are stored before the program's arrival
+                arrived = tl.atomic_add(cnt_ptr, 1, sem="acq_rel", scope="gpu")
+                if arrived == tl.num_programs(0) * tl.num_programs(1) - 1:  # the last to arrive finishes every row
+                    _rows_finish(ybase, nw_ptr, freqs_ptr, start_ptr, out_ptr, M, N, S, eps, 0, 1, KSPLIT, RD, PBD, RB)
+
+    @triton.jit
+    def _rows_finish(p_ptr, nw_ptr, freqs_ptr, start_ptr, out_ptr, M, N, S, eps, first, stride,
+                     KSUM: tl.constexpr, RD: tl.constexpr, BD: tl.constexpr, RB: tl.constexpr):
+        """_row_post_kernel's finish for window_kv (NORM, the rotary of the last RD elements, QUANT,
+        one row a token) over rows first, first + stride, ... of the fp32 partials p [KSUM, M, N],
+        after every program of the GEMV has arrived: program p of P finishes every P-th row, RB
+        of them at a time, so the rows finish in parallel as the separate kernel's programs did.
+        The partials were written by other programs during this kernel: this SM has not loaded
+        their lines before, so the loads come from L2 after the acquire (volatile loads, which
+        also forbid vectorizing, measured 3x slower). The same arithmetic as the kernel."""
+        eps = eps.to(tl.float32)
+        d = tl.arange(0, BD)
+        live = d < N
+        for m0 in range(first, M, stride * RB):
+            ms = m0 + tl.arange(0, RB) * stride
+            mlive = ms < M
+            mask = mlive[:, None] & live[None, :]
+            x = tl.zeros((RB, BD), dtype=tl.float32)
+            for k in tl.static_range(KSUM):
+                x += tl.load(p_ptr + (k * M + ms)[:, None] * N + d[None, :], mask=mask, other=0.0)
+            x = x.to(tl.bfloat16).to(tl.float32)
+            rstd = tl.math.rsqrt(tl.sum(x * x, axis=1) / N + eps)
+            nw = tl.load(nw_ptr + d, mask=live, other=0.0).to(tl.float32)
+            x = (nw[None, :] * (x * rstd[:, None])).to(tl.bfloat16).to(tl.float32)
+            if RD > 0:
+                ev, od = tl.split(tl.reshape(x, (RB, BD // 2, 2)))
+                even_dim = 2 * tl.arange(0, BD // 2)
+                tail = even_dim >= N - RD
+                pair = (even_dim - (N - RD)) // 2
+                pos = tl.load(start_ptr + ms // S, mask=mlive, other=0) + ms % S
+                fb = freqs_ptr + pos[:, None] * RD + 2 * pair[None, :]
+                fmask = mlive[:, None] & tail[None, :]
+                c = tl.load(fb, mask=fmask, other=1.0)
+                sn = tl.load(fb + 1, mask=fmask, other=0.0)
+                x = tl.reshape(tl.join(ev * c - od * sn, ev * sn + od * c), (RB, BD))
+                x = x.to(tl.bfloat16).to(tl.float32)  # the fork writes the rotated tail back as bf16
+            xg = tl.reshape(x, (RB, BD // 32, 32))
+            amax = tl.maximum(tl.max(tl.abs(xg), axis=2), 1e-4)
+            v = amax / 448.0
+            bits = v.to(tl.int32, bitcast=True)
+            exponent = (bits >> 23) & 0xFF
+            exponent = tl.where((bits & 0x7FFFFF) == 0, exponent, exponent + 1)
+            scale = (exponent << 23).to(tl.float32, bitcast=True)
+            q = tl.minimum(tl.maximum(xg / scale[:, :, None], -448.0), 448.0)
+            x = tl.reshape(_round_e4m3(q) * scale[:, :, None], (RB, BD))
+            tl.store(out_ptr + ms[:, None] * N + d[None, :], x.to(tl.bfloat16), mask=mask)
 
 
 # rows one pass over the weight serves (BM); beyond, a GEMM. VXPU_GEMV_ROWS_MAX overrides it, to
@@ -622,7 +708,7 @@ def _pe_blocks(M, K, tiles=3, device=None):
 
 
 def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, blocks=None, traced=False,
-              quant_out=False, ksplit=1, hc=None):
+              quant_out=False, ksplit=1, hc=None, post=None):
     """x [M, G*K] bf16 times weight [N, K] (bf16, or fp8 e4m3 with [N/32, K/32] e8m0 block
     scales) transposed -> [M, N] in out_dtype, the weight read once for all M <= GEMV_ROWS_MAX
     rows. group_rows as fp8_gemv. quant_out quantizes the bf16 result to the fp8 grid per 32
@@ -633,7 +719,10 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
     (residual [M, hc, N] bf16, post [M, hc] fp32, comb [M, hc, hc] fp32, add [M, N] fp32 or None)
     makes the epilogue the fork's hc_post (see the kernel) and the result the stream [M, hc, N]
     bf16: the block's output mixed back into the hyper-connection stream without a kernel of its
-    own."""
+    own. post = (counter [1] int32 at zero, norm_weight [N], freqs [positions, rope_dim / 2, 2]
+    fp32, start [b] int64, seqlen, eps, rope_dim) makes the last program to arrive finish every
+    row of the result as window_kv's row_post would (the kernel's POST) and returns that [M, N]
+    bf16 instead of the partials."""
     M = x.shape[0]
     N, K = weight.shape
     R = group_rows or N
@@ -679,20 +768,27 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
                          f"[{N // 32}, {K // 32}], got {scale.dtype} {tuple(scale.shape)}")
     HC = 0
     if hc is not None:
-        residual, post, comb, add = hc
+        residual, hpost, comb, add = hc
         HC = residual.shape[1]
-        if (ksplit > 1 or quant_out or tuple(residual.shape) != (M, HC, N) or tuple(post.shape) != (M, HC)
+        if (ksplit > 1 or quant_out or tuple(residual.shape) != (M, HC, N) or tuple(hpost.shape) != (M, HC)
                 or tuple(comb.shape) != (M, HC, HC) or (add is not None and tuple(add.shape) != (M, N))):
             raise ValueError(f"gemv_rows: hc epilogue with residual {tuple(residual.shape)}, post {tuple(post.shape)}, "
                              f"comb {tuple(comb.shape)}, add {None if add is None else tuple(add.shape)} for [{M}, {N}]")
         residual = residual.contiguous()
-        post = post.contiguous().float()
+        hpost = hpost.contiguous().float()
         comb = comb.contiguous().float()
         add = add.contiguous().float() if add is not None else residual
         y = torch.empty((M, HC, N), dtype=torch.bfloat16, device=x.device)
     else:
-        residual = post = comb = add = x
+        residual = hpost = comb = add = x
         y = torch.empty((ksplit, M, N) if ksplit > 1 else (M, N), dtype=out_dtype, device=x.device)
+    cnt = nw = freqs = start = out = x
+    seqlen, eps, rope_dim = 1, 0.0, 0
+    if post is not None:
+        if hc is not None or quant_out or N % 32:
+            raise ValueError("gemv_rows: the post finish needs a plain result with N a multiple of 32")
+        cnt, nw, freqs, start, seqlen, eps, rope_dim = post
+        out = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
     if M and N:
         w = weight.contiguous()
         s = scale.contiguous().view(torch.uint8) if scale is not None else w
@@ -701,13 +797,16 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
         xq, xe = x_mxfp8(xc, traced=traced) if native and not recode else (xc, xc)
         kernel, ctx = _launcher(_gemv_rows_kernel, x.device, traced)
         with ctx:
-            kernel[(triton.cdiv(N, bn), ksplit)](xc, xq, xe, w, s, y, residual, post, comb, add, M, N, K,
-                                                x.shape[1], R, scale.shape[1] if scale is not None else 0,
+            kernel[(triton.cdiv(N, bn), ksplit)](xc, xq, xe, w, s, y, residual, hpost, comb, add,
+                                                M, N, K, x.shape[1], R, scale.shape[1] if scale is not None else 0,
+                                                cnt, nw, freqs, start, out, seqlen, float(eps),
                                                 HAS_SCALE=scale is not None, BM=bm, BN=bn, BK=bk,
                                                 EPI_QUANT=quant_out, KSPLIT=ksplit, EPI_HC=HC,
                                                 HAS_ADD=hc is not None and hc[3] is not None, NATIVE=native,
-                                                RECODE=recode, **_launch_opts(warps, stages))
-    return y
+                                                RECODE=recode, POST=post is not None, RD=rope_dim,
+                                                PBD=triton.next_power_of_2(N) if post is not None else 0,
+                                                RB=FOLD_POST_RB, **_launch_opts(warps, stages))
+    return out if post is not None else y
 
 
 def _narrow_ksplit(N, bn, K, bk, device=None):
@@ -1121,7 +1220,8 @@ if triton is not None:
         tl.store(y_ptr + m * D + d, x.to(tl.bfloat16), mask=live)
 
 
-def window_kv(x, wkv, scale, norm_weight, norm_eps, freqs, start, seqlen, rope_dim, quantized=False, traced=False):
+def window_kv(x, wkv, scale, norm_weight, norm_eps, freqs, start, seqlen, rope_dim, quantized=False, traced=False,
+              counters=None):
     """The attention's window key for a decode step's rows, in two or three kernels: x [.., K]
     quantized to the fp8 grid (skipped when `quantized`), the projection wkv [D, K] (fp8, e8m0
     block scales), and the row's finishing: kv_norm, the rotary of the last rope_dim elements
@@ -1137,6 +1237,12 @@ def window_kv(x, wkv, scale, norm_weight, norm_eps, freqs, start, seqlen, rope_d
             or start.numel() * seqlen != M):
         raise ValueError(f"window_kv: x {tuple(x.shape)}, wkv {tuple(wkv.shape)}, rope {rope_dim}, "
                          f"freqs {tuple(freqs.shape)}, start {tuple(start.shape)} x {seqlen}")
+    if _fold_post_on() and M:  # the row's finish in the GEMV's last program (FOLD_POST, hero run 11)
+        cnt = step_counters(1, x.device, counters)
+        y = gemv_rows(xq, wkv, scale, traced=traced, ksplit="narrow",
+                      post=(cnt, norm_weight.contiguous(), freqs.contiguous(), start.contiguous(), seqlen,
+                            float(norm_eps), rope_dim))
+        return y.reshape(tuple(x.shape[:-1]) + (D,))
     kv = gemv_rows(xq, wkv, scale, traced=traced, ksplit="narrow")
     ks = kv.shape[0] if kv.dim() == 3 else 1  # the split the dispatcher (or the table) chose
     y = torch.empty(M, D, dtype=torch.bfloat16, device=x.device)
@@ -1990,8 +2096,9 @@ if triton is not None:
     @torch.library.triton_op("vxpu_triton::window_kv", mutates_args=())
     def _window_kv_op(x: torch.Tensor, wkv: torch.Tensor, scale: torch.Tensor, norm_weight: torch.Tensor,
                       norm_eps: float, freqs: torch.Tensor, start: torch.Tensor, seqlen: int, rope_dim: int,
-                      quantized: bool) -> torch.Tensor:
-        return window_kv(x, wkv, scale, norm_weight, norm_eps, freqs, start, seqlen, rope_dim, quantized, traced=True)
+                      quantized: bool, counters: typing.Optional[torch.Tensor] = None) -> torch.Tensor:
+        return window_kv(x, wkv, scale, norm_weight, norm_eps, freqs, start, seqlen, rope_dim, quantized, traced=True,
+                         counters=counters)
 
     @torch.library.triton_op("vxpu_triton::attn_out", mutates_args=())
     def _attn_out_op(o: torch.Tensor, freqs: torch.Tensor, start: torch.Tensor, seqlen: int, wo_a: torch.Tensor,
@@ -2040,7 +2147,7 @@ lowered = types.SimpleNamespace(
     rotary=lambda x, cos, sin: torch.ops.vxpu_triton.rotary(x, cos, sin),
     shared_ffn=lambda *a: torch.ops.vxpu_triton.shared_ffn(*a),
     attn_q=lambda *a: torch.ops.vxpu_triton.attn_q(*a),
-    window_kv=lambda *a: torch.ops.vxpu_triton.window_kv(*a),
+    window_kv=lambda *a, counters=None: torch.ops.vxpu_triton.window_kv(*a, counters),
     attn_out=lambda *a: torch.ops.vxpu_triton.attn_out(*a),
     sparse_attn_finish=lambda *a: torch.ops.vxpu_triton.sparse_attn_finish(*a),
     attn_select=lambda *a: torch.ops.vxpu_triton.attn_select(*a),
