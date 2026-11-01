@@ -114,7 +114,7 @@ func TestMeasureChoosesTheFastestAndKeepsFailuresOut(t *testing.T) {
 			us := 40.0 - float64(j.Blocks["BN"])/4 - float64(j.Blocks["warps"]) - float64(j.Blocks["stages"])/10
 			if strings.Contains(j.Shapes, "split=1") {
 				us = 12.0 - float64(j.Blocks["KSPLIT"])
-				if j.Blocks["KSPLIT"] == 8 {
+				if j.Blocks["KSPLIT"] >= 8 {
 					us = 20
 				}
 			}

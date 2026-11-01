@@ -125,9 +125,9 @@ func (c Class) field(name string) int {
 // nothing better for). The axes: weight rows per program BN (16, 32, 64;
 // whole quantization blocks of 32 where the epilogue quantizes; even and
 // dividing the head's unrotated part for the rotary epilogue), the K step
-// BK (128, 256, 512 dividing the slice), the K split KSPLIT (1, 2, 4, 8
-// where the caller takes partial sums, and only until the programs fill
-// the card twice over: sms), warps (4, 8). Stages stay at the compiler's
+// BK (64 to 512 dividing the slice), the K split KSPLIT (1 to 16 where the
+// caller takes partial sums, and only until the programs fill the card
+// twice over: sms), warps (4, 8). Stages stay at the compiler's
 // default; a second pass can sweep them on the winner.
 func Candidates(c Class, ran map[string]int, sms int) []map[string]int {
 	var bns, bks, splits, warps []int
@@ -142,10 +142,10 @@ func Candidates(c Class, ran map[string]int, sms int) []map[string]int {
 			bns = []int{32, 64}
 		}
 	}
-	bks = []int{128, 256, 512}
+	bks = []int{64, 128, 256, 512}
 	splits = []int{1}
 	if c.Template == "dual_gemv_swiglu" || c.Fields["split"] == "1" {
-		splits = []int{1, 2, 4, 8}
+		splits = []int{1, 2, 4, 8, 16}
 	}
 	warps = []int{4, 8}
 	rowsPerGroup := c.N
