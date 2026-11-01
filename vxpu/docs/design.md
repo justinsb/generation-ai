@@ -1225,6 +1225,44 @@ body and the kernel on 1% of noise (58.5 against 57.6 µs), moving the
 tokens at position 26 between two loads of the same tree; a fused body
 now has to beat the kernel by max(3%, 2 µs) (`costs.decide`), and the
 record says by how much.
+**Hero run 11, the fp4 expert kernels against their floor (Nov 1,
+evening, pod B).** The floor first. The card reads at 1,535 GB/s (a 1 GiB
+stream, plain loads or TMA boxes of 32 by 128 bytes alike; the 1,460 used
+before is a copy's read plus write). A stream of the gate/up kernel's own
+71 MB at its own program count (864 programs of 80 KB) reads at 1,440 to
+1,470 GB/s: ramp and tail cost about 2.5 µs a launch at this size, so the
+80 expert launches of a one-row step pay about 0.2 ms for being 80. The
+achievable floor a layer is therefore about 51.5 µs for gate/up (75.2 MB)
+and 28.5 for down (37.6 MB); the kernels stood at 60.4 and 32.9 in
+isolation, 63.6 and 33.1 inside the step. What was measured (synthetic
+banks of the real shapes rotating over 96 experts so the 128 MB L2 never
+serves a repeat; six pairs; 108 tile, warp and stage sets per kernel): the
+sweep alone finds the old tiles best, because gate/up loaded x as a
+[16, BK] tile with one live row and the pipeline staged that tile per stage
+(8 KB a stage, twice the weight tile), holding the resident programs to
+four an SM; with x loaded as one row and broadcast in registers a third
+stage wins, 57.6 µs (1,305 GB/s). The descriptor made on the host once per
+bank instead of per program: about 1 µs. Down: nothing faster than its
+tiles, 32.2 µs with the host descriptor. Measured and not taken: a
+tile-major bank layout (each box one contiguous 4 KB) 1.3 µs more; two K
+tiles an iteration, gate and up in one program (bit-identical, with the
+SwiGLU, routing weight and per-32 quantization in its epilogue so that down
+streams h; down then 31.8 but gate/up 70 to 82), narrow K tiles with deep
+pipelines: all slower; the TMA box shape on a pure stream: no effect. The
+tiles are eight table knobs (FP4_GU_BN/BK/WARPS/STAGES, FP4_DN_*) and the
+sweep's choice is a kernel table with blocks per shape class
+(`dev/hero/fp4-blocks-rtx6000.json`). In the step, both arms under the
+pinned table `table-h11.json` in one session: gate/up 63.6 to 60.5 µs a
+layer and down 33.1 to 32.6, the step's GPU time 13.01 to 12.89 ms, the
+one-row step 13.2 to 13.1 ms, tokens identical at one, nine and 33 rows;
+nine rows 21.2/17.0/34.3 to 21.1/17.0/34.3 and 33 rows 29.0/26.8/93.7 to
+29.0/26.8/91.8 (the grouped path, untouched). Against the acceptance:
+gate/up at 85% of the read peak and 89% of the achievable 71 MB stream,
+down at 75% and 81%; 90% of the peak is not reachable at two launches a
+layer of this size, and the next step is one launch a layer (gate/up and
+down phases in one persistent kernel with a per-pair arrival count), which
+is worth the ramp and tail of 40 launches, about 0.1 ms a step, and the
+overlap of the two phases' tails.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
