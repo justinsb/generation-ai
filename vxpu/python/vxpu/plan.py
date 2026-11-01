@@ -213,13 +213,14 @@ class Impl:
     host: bool = False        # runs where its data lives on the host (the expert banks, the n-gram tables)
     lowerable: bool = False   # fn(..., tk=triton_ops.lowered) is traceable: the plan's lowering may inline it (lower.py)
     fused: bool = False       # a decomposed body for the compiler to fuse, chosen where measured cheaper (costs.py)
+    counters: object = None   # counters(**ctx) -> how many zeroed int32 arrival counters a call needs (the lowering's scratch)
 
 
 REGISTRY = collections.defaultdict(list)  # op -> [Impl], in preference order
 
 
 def implementation(op, name, devices, numerics, when, applies=None, reference=False, host=False, lowerable=False,
-                   fused=False):
+                   fused=False, counters=None):
     """Register fn as an implementation of op. Registration order is the
     preference order: the first one that applies is selected. host=True
     marks an op that runs where its data is (on the host for host-placed
@@ -231,7 +232,7 @@ def implementation(op, name, devices, numerics, when, applies=None, reference=Fa
     cheaper (costs.py)."""
     def register(fn):
         REGISTRY[op].append(Impl(op, name, fn, tuple(devices), numerics, when, applies, reference, host, lowerable,
-                                 fused))
+                                 fused, counters))
         return fn
     return register
 
@@ -294,6 +295,7 @@ KNOBS = {
     "GEMV_ROWS_MAX": int, "FP4_DIRECT_MAX": int, "FFN_FRONT_EB": int, "FFN_FRONT_BD": int,
     "FRONT_SPLIT_BD": int, "FRONT_SPLIT_EB": int, "FP4_KSPLIT": int, "FP4_NATIVE": bool, "FP4_DIRECT": bool,
     "MXFP8_RECODE": bool,  # the native GEMV bodies recode x in their prologue (true) or in a launch before each (default)
+    "FOLD_POST": bool, "FOLD_POST_RB": int,  # window_kv's row finish in its GEMV's last program (hero run 11), rows at a time
 }
 
 

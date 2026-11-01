@@ -120,9 +120,12 @@ def _value(gm, arg):
 
 
 def _implementation(op, impl):
-    """A function computing op's result with impl, its kernels traced."""
-    def fn(*args):
-        return ops.call(op, lambda *a: impl.fn(*a, tk=triton_ops.lowered), *args)
+    """A function computing op's result with impl, its kernels traced; with counters (the
+    lowering's scratch slice, for an impl that declared it needs them), handed to impl.fn."""
+    def fn(*args, counters=None):
+        if counters is None:
+            return ops.call(op, lambda *a: impl.fn(*a, tk=triton_ops.lowered), *args)
+        return ops.call(op, lambda *a: impl.fn(*a, tk=triton_ops.lowered, counters=counters), *args)
     return fn
 
 
@@ -146,7 +149,7 @@ def _site(node):
     return path, layer
 
 
-def _inline(gm, node, fn, values, device=None):
+def _inline(gm, node, fn, values, device=None, counters=None):
     """Replace node with fn traced to torch ops on the node's values
     (shapes, dtypes and devices: fake tensors, nothing is computed).
     Non-tensor arguments are constants of the traced graph. Returns the
@@ -159,29 +162,41 @@ def _inline(gm, node, fn, values, device=None):
     its inputs' device (an arange on start.device, a cast's copy) names
     that GPU and not the one the lowering happens to run on; and any
     device literal the trace still carries for another GPU is rewritten
-    before the copy into gm. Without it the values' own devices stand."""
+    before the copy into gm. Without it the values' own devices stand.
+
+    counters: (n, scratch node) when the body needs n zeroed int32 arrival
+    counters a step (Impl.counters): the node, a slice of the segment's
+    scratch, is traced as one more input and handed to fn as counters=."""
     leaves, spec = pytree.tree_flatten(values)
     arg_leaves, _ = pytree.tree_flatten(node.args)
     at = [i for i, v in enumerate(leaves) if isinstance(v, torch.Tensor)]
 
     def flat(*tensors):
         vals = list(leaves)
-        for i, t in zip(at, tensors):
+        for i, t in zip(at, tensors[:len(at)]):
             vals[i] = t
+        if counters is not None:
+            return fn(*pytree.tree_unflatten(vals, spec), counters=tensors[len(at)])
         return fn(*pytree.tree_unflatten(vals, spec))
 
     with FakeTensorMode():
         examples = [torch.empty_strided(leaves[i].shape, leaves[i].stride(), dtype=leaves[i].dtype,
                                         device=device if device is not None and leaves[i].is_cuda else leaves[i].device)
                     for i in at]
+        if counters is not None:
+            examples.append(torch.empty(counters[0], dtype=torch.int32,
+                                        device=device if device is not None else _device(values)))
     traced = make_fx(flat, tracing_mode="fake")(*examples)
     if device is not None:
         _retarget(traced.graph, device)
     kernels = [str(n.target).removesuffix(".default") for n in traced.graph.nodes
                if n.op == "call_function" and str(n.target).startswith("vxpu_triton.")]
     placeholders = [n for n in traced.graph.nodes if n.op == "placeholder"]
+    mapping = {ph: arg_leaves[i] for ph, i in zip(placeholders, at)}
+    if counters is not None:
+        mapping[placeholders[len(at)]] = counters[1]
     with gm.graph.inserting_before(node):
-        out = gm.graph.graph_copy(traced.graph, {ph: arg_leaves[i] for ph, i in zip(placeholders, at)})
+        out = gm.graph.graph_copy(traced.graph, mapping)
     if isinstance(out, (tuple, list)):  # a multi-output op: its users take items
         for user in list(node.users):
             if user.op == "call_function" and user.target is operator.getitem:
@@ -360,6 +375,7 @@ def lower(gm, plan, layer_device=None):
         if joined:
             report["vxpu::shared_ffn_front"]["joined"] = joined
     devices = _segment_devices(gm, layer_device)
+    scratch = _Scratch()
     for node in list(gm.graph.nodes):
         target = str(node.target)
         if node.op != "call_function" or not target.startswith("vxpu.") or target in HOST_OPS:
@@ -401,9 +417,14 @@ def lower(gm, plan, layer_device=None):
             report[op]["kept"][impl.name] += 1
             plan.record_site(kernels=None, **entry)
             continue
-        kernels = _inline(gm, node, _implementation(op, impl), args, device=target)
+        counters = None
+        wanted = impl.counters(**ctx) if impl.counters is not None else 0
+        if wanted:
+            counters = (wanted, scratch.take(gm, node, wanted, target if target is not None else _device(args)))
+        kernels = _inline(gm, node, _implementation(op, impl), args, device=target, counters=counters)
         report[op]["lowered"][impl.name] += 1
         plan.record_site(kernels=kernels, **entry)
+    scratch.close()
     if "matmul" in plan["fuse"]:
         _fuse_matmuls(gm, report, devices)
     if any(r["lowered"] for r in report.values()):
@@ -415,6 +436,32 @@ def lower(gm, plan, layer_device=None):
 
 def _device(values):
     return next(v.device for v in pytree.tree_leaves(values) if isinstance(v, torch.Tensor))
+
+
+class _Scratch:
+    """The segment's arrival counters (hero run 11): one zeros node per segment graph and GPU,
+    sliced per site that declared it needs counters (Impl.counters). The zeros is an
+    intermediate of the compiled segment, so every captured graph has its own, zeroed by one
+    fill a step per segment; no kernel owns a global that two batches in flight could share."""
+
+    def __init__(self):
+        self.nodes = {}  # device -> (zeros node, count so far)
+
+    def take(self, gm, before, n, device):
+        key = str(device)
+        if key not in self.nodes:
+            first = next(nd for nd in gm.graph.nodes if nd.op != "placeholder")
+            with gm.graph.inserting_before(first):
+                zeros = gm.graph.call_function(torch.zeros, ([0],), {"dtype": torch.int32, "device": torch.device(device)})
+            self.nodes[key] = [zeros, 0]
+        zeros, off = self.nodes[key]
+        self.nodes[key][1] = off + n
+        with gm.graph.inserting_before(before):
+            return gm.graph.call_function(torch.ops.aten.slice.Tensor, (zeros, 0, off, off + n))
+
+    def close(self):
+        for zeros, total in self.nodes.values():
+            zeros.args = ([total],)
 
 
 def _cheaper(op, fused, other, args, report):
