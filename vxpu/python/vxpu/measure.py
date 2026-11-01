@@ -273,7 +273,7 @@ def classes_report(record, gbps):
     rows = []
     for key, entry in classes.items():
         nbytes = class_bytes(key)
-        rows.append({"shapes": key, "count": entry.get("count"), "blocks": entry.get("blocks"), "bytes": nbytes,
+        rows.append({"shapes": key, "count": entry.get("sites") or entry.get("count"), "blocks": entry.get("blocks"), "bytes": nbytes,
                      "floor_us": round(nbytes / gbps / 1e3, 2), "from_table": entry.get("from_table", False)})
     rows.sort(key=lambda r: -r["bytes"] * (r["count"] or 1))
     return rows

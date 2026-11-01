@@ -561,10 +561,12 @@ def gemv_class(template, M, N, K, w, **flags):
     return " ".join(parts)
 
 
-def gemv_blocks(key, bm, bn, bk, ksplit=1, warps=4, stages=3, allow_ksplit=False):
+def gemv_blocks(key, bm, bn, bk, ksplit=1, warps=4, stages=3, allow_ksplit=False, traced=False):
     """The blocks a GEMV call of shape class `key` runs with: the table's (GEMV_BLOCKS) where it
     names the class, else the defaults given. KSPLIT is taken from the table only where the
-    caller can consume partial sums (allow_ksplit). Counts the class for the record."""
+    caller can consume partial sums (allow_ksplit). Counts the class for the record: `count` is
+    every launch since the process started (warm-up and prefill included), `sites` the call sites
+    the lowering traced (traced=True), which is the class's launches a decode step."""
     chosen = GEMV_BLOCKS.get(key)
     if chosen:
         bn = int(chosen.get("BN", bn))
@@ -573,8 +575,9 @@ def gemv_blocks(key, bm, bn, bk, ksplit=1, warps=4, stages=3, allow_ksplit=False
         stages = int(chosen.get("stages", stages))
         if allow_ksplit:
             ksplit = int(chosen.get("KSPLIT", ksplit))
-    entry = GEMV_CLASSES.setdefault(key, {"count": 0, "blocks": {}, "from_table": bool(chosen)})
+    entry = GEMV_CLASSES.setdefault(key, {"count": 0, "sites": 0, "blocks": {}, "from_table": bool(chosen)})
     entry["count"] += 1
+    entry["sites"] += int(bool(traced))
     entry["blocks"] = {"BM": bm, "BN": bn, "BK": bk, "KSPLIT": ksplit, "warps": warps, "stages": stages}
     return bm, bn, bk, ksplit, warps, stages
 
@@ -661,7 +664,7 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
                      epi=("quant" if quant_out else f"hc{HC0}" if HC0 else None),
                      groups=(N // R if R != N else 0), out=("f32" if out_dtype == torch.float32 and not narrow else None),
                      split=narrow)
-    bm, bn, bk, ksplit, warps, stages = gemv_blocks(key, bm, bn, bk, ksplit, allow_ksplit=narrow)
+    bm, bn, bk, ksplit, warps, stages = gemv_blocks(key, bm, bn, bk, ksplit, allow_ksplit=narrow, traced=traced)
     if ksplit > 1:
         if K % ksplit or quant_out:
             raise ValueError(f"gemv_rows: a K split of {ksplit} needs K {K} divisible and no quant_out")
@@ -859,7 +862,7 @@ def shared_ffn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized=False, y_exper
     ks = _narrow_ksplit(I, bn, K, bk, x.device)
     native = _mx_native(x.device.index)
     key = gemv_class("dual_gemv_swiglu", M, I, K, "fp8", native=native)
-    bm, bn, bk, ks, warps, stages = gemv_blocks(key, bm, bn, bk, ks, allow_ksplit=True)
+    bm, bn, bk, ks, warps, stages = gemv_blocks(key, bm, bn, bk, ks, allow_ksplit=True, traced=traced)
     if bn % 32 or I % bn or K % ks or (K // ks) % bk:
         raise ValueError(f"shared_ffn: blocks BN={bn} BK={bk} KSPLIT={ks} do not fit I={I}, K={K} (whole quantization "
                          f"blocks per program, whole K steps per slice)")
@@ -1043,7 +1046,7 @@ def attn_q(x, wq_a, sa, norm_weight, norm_eps, wq_b, sb, freqs, start, seqlen, h
         native = _mx_native(x.device.index)  # no prologue here: qq is on the fp8 grid already
         recode = native and _mx_recode_on()
         key = gemv_class("gemv_pe", M, N, R, "fp8", native=native, epi="rotary", hd=head_dim, rd=rope_dim)
-        bm, bn, bk, _, warps, stages = gemv_blocks(key, bm, bn, bk)
+        bm, bn, bk, _, warps, stages = gemv_blocks(key, bm, bn, bk, traced=traced)
         if N % bn or (head_dim - rope_dim) % bn or bn % 2 or R % bk:
             raise ValueError(f"attn_q: blocks BN={bn} BK={bk} do not fit N={N}, heads of {head_dim} with rope {rope_dim}, R={R}")
         qq8, qe8 = x_mxfp8(qq, traced=traced) if native and not recode else (qq, qq)

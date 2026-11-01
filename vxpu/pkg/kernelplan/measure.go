@@ -61,9 +61,18 @@ type BlockEntry struct {
 // ClassRun is a shape class as the record saw it: launches a step and
 // the blocks that ran (stats.gemv_classes).
 type ClassRun struct {
-	Count     int            `json:"count"`
+	Count     int            `json:"count"` // launches since the process started (warm-up and prefill included)
+	Sites     int            `json:"sites"` // call sites the lowering traced: the launches a decode step
 	Blocks    map[string]int `json:"blocks"`
 	FromTable bool           `json:"from_table"`
+}
+
+// AStep is the class's launches a decode step: the traced sites, else the count.
+func (c ClassRun) AStep() int {
+	if c.Sites > 0 {
+		return c.Sites
+	}
+	return c.Count
 }
 
 // Classes reads the GEMV shape classes out of a record's stats.
@@ -449,7 +458,7 @@ func Measure(ctx context.Context, classes map[string]ClassRun, runner Runner, op
 			gain = fmt.Sprintf(", %.0f%% of the engine's %.1f us", 100*best.Us/ranUs, ranUs)
 		}
 		explain = append(explain, fmt.Sprintf("%s (%d a step): %s %.1f us, floor %.1f, %.0f%% of bandwidth%s, %d candidates",
-			key, classes[key].Count, blockKey(best.Blocks), best.Us, best.FloorUs, 100*best.Efficiency, gain, len(rs)-failed))
+			key, classes[key].AStep(), blockKey(best.Blocks), best.Us, best.FloorUs, 100*best.Efficiency, gain, len(rs)-failed))
 		_ = c
 	}
 	return entries, explain, nil
@@ -477,8 +486,8 @@ func StepFloor(classes map[string]ClassRun, entries []BlockEntry) (bytesAStep in
 		if !ok {
 			continue
 		}
-		bytesAStep += e.Bytes * int64(run.Count)
-		usAStep += e.Us * float64(run.Count)
+		bytesAStep += e.Bytes * int64(run.AStep())
+		usAStep += e.Us * float64(run.AStep())
 	}
 	return bytesAStep, usAStep
 }
