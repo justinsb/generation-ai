@@ -1358,6 +1358,48 @@ narrow GEMVs. Process: the four workstreams ran in parallel with deadline
 reports and results read from the pods' files, and the run closed in
 seven hours.
 
+**Hero run 12's acceptance, agreed Nov 1 (night): the throughput axis.**
+The one-row step is converging (hero 11's ledger prices every remaining
+item there at 0.1 to 0.5 ms); the throughput side has two cliffs that
+each cost more than all of them together. Four workstreams in parallel,
+each with its own measurement, controls on the same tree and the pinned
+site table on both arms:
+1. The wide-row GEMM template. Above 64 rows every fused body and one-pass
+   kernel hands over to a reference path (one batch of 66 rows steps in 209
+   ms against 95 at 33). A row-tiled GEMM for the fp8 weights with MXFP8
+   scales, the weight streamed once per row tile, instantiated for the
+   rows-over-64 class and chosen by the table above the GEMV's handover,
+   with the same epilogues the GEMV template offers where the lowering
+   asks for them. Acceptance: one batch of 66, 99 and 132 rows on the
+   calibrated slope (about 0.6 ms a row above the 33-row step: 132 rows
+   near 160 ms, about 830 tok/s), duplicate-row check clean, tokens within
+   the rounding class of the reference bodies; the ledger's per-class
+   efficiency for the new template.
+2. Memory for batches in flight. Four batches of 66 (predicted 2,025
+   tok/s) and the drafter at four batches of 33 ran out of memory on GPU 1
+   (97 GB), whose 12-layer range holds 86.6 GB of experts; the cut points
+   are fixed by the KV groups and the indexer (hero 9's Balance), so the
+   levers are elsewhere. Deliver: a memory ledger per GPU for a planned
+   shape (weights, experts, caches per batch and row, the graphs' scratch,
+   the replicas), in the planner; the two levers costed with the model: an
+   expert residency budget on the full GPUs (the hottest experts resident,
+   the rest through the host path, per-step cost from the expert
+   statistics) and a cut inside a KV group through the replica mechanism;
+   then 4×66 and the drafter at 4×33 measured if a lever fits, else the
+   ledger and the predicted cost of each lever, stated.
+3. One expert launch per layer (hero 11's unfinished item): the gate/up
+   and down phases in one kernel with a per-pair arrival count; the two
+   launches cost about 2.5 µs each in ramp and tail and their tails do not
+   overlap. Acceptance: expert time per layer at one row from 93 to about
+   85 µs, tokens identical, nine and 33 rows (the grouped path) no worse.
+4. Adaptive speculation measured in the engine: the confidence and
+   expert-aware policies hero 10 plumbed, run for real at one row and at
+   four 8-row batches of different prompts, against fixed drafts and
+   against no drafter, with the model's prediction beside each; the
+   policies' parameters in the record replace the estimates.
+Deadlines: interim reports with numbers at 02:00 and 05:00 UTC, final by
+07:00 UTC; results read from the pods' files.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
