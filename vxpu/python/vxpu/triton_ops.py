@@ -156,21 +156,29 @@ if triton is not None:
         bits = v.to(tl.int32, bitcast=True)
         exponent = (bits >> 23) & 0xFF
         exponent = tl.where((bits & 0x7FFFFF) == 0, exponent, exponent + 1)
-        scale = (exponent << 23).to(tl.float32, bitcast=True)
-        q = tl.minimum(tl.maximum(tl.reshape(xg / scale[:, :, None], (BM, BK)), -448.0), 448.0)
+        # x times the exact reciprocal of the block's scale (a power of two: the same bits as the
+        # division by it, without the divide per element; the exponent stays well inside the
+        # normal range, 105 to about 135)
+        inv = ((254 - exponent) << 23).to(tl.float32, bitcast=True)
+        q = tl.minimum(tl.maximum(tl.reshape(xg * inv[:, :, None], (BM, BK)), -448.0), 448.0)
         return q.to(tl.float8e4nv), exponent.to(tl.uint8)
 
 
 MXFP8_NATIVE = os.environ.get("VXPU_MXFP8_NATIVE")  # override: force the native (1) or converting (0) GEMV body (A/B)
-# Where the native bodies recode x to MXFP8: "1" (the default) in the GEMV's own prologue (_mx_recode), "0" in
-# a kernel of its own before every GEMV (x_mxfp8: about 290 launches a decode step). A planner knob; the
-# A/B switch is VXPU_MXFP8_RECODE=0.
+# Where the native bodies recode x to MXFP8: "1" in the GEMV's own prologue (_mx_recode), "0" (the default) in
+# a kernel of its own before every GEMV (x_mxfp8: 284 launches of the one-row decode step). A planner knob
+# (MXFP8_RECODE in the kernel table); VXPU_MXFP8_RECODE=1 is the A/B switch. Measured on four RTX PRO 6000
+# (hero 10, Nov 1): the prologue takes 290 launches out of the step and leaves it at 13.3 ms at one row (13.2
+# with the reciprocal multiply below), because every program of a GEMV recodes the whole x tile at every K
+# step and the GEMVs lengthen by what the launches cost (gemv_rows 21.4 -> 22.6 us, gemv_pe 30.1 -> 35.1); at
+# nine rows it costs 1.1 ms (21.2 -> 22.4 ms a step; gemv_rows 21.9 -> 26.3 us, gemv_pe 31.9 -> 47.7). The fold
+# that pays is the producer's: the kernel that makes the activation writes the codes and scales once.
 MXFP8_RECODE = os.environ.get("VXPU_MXFP8_RECODE")
 
 
 def _mx_recode_on():
-    """Whether the native bodies recode x themselves (MXFP8_RECODE, default on)."""
-    return MXFP8_RECODE != "0"
+    """Whether the native bodies recode x themselves (MXFP8_RECODE, default off: see above)."""
+    return MXFP8_RECODE == "1"
 
 
 @functools.lru_cache(maxsize=None)
@@ -203,7 +211,9 @@ def x_mxfp8(x, traced=False):
 
 
 # A wave's crossing copies and its flag as one kernel (the ring write), "0" for cuMemcpyAsync per value and a
-# stream memory operation for the flag (the A/B; stepgraph.py).
+# stream memory operation for the flag (the A/B; stepgraph.py). Measured on four RTX PRO 6000 (hero 10, Nov 1):
+# the sharded step's 24 copy nodes become 2 and three kernels (3.6 us a wave at one row against 8 copies of
+# 0.6 us; 17.6 us against 8 of 2.1 at nine rows); the step time is unchanged at both, the tokens identical.
 RING_WRITE = os.environ.get("VXPU_RING_WRITE", "1") != "0"
 RING_VALUES = 8  # values one ring write kernel carries at most
 RING_BLOCK = 4096  # int32 words a program copies

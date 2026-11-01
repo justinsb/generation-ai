@@ -283,9 +283,14 @@ def key_cache_dir():
     return _keyed_cache_dir
 
 
-# The shared expert joined back into one op (shared_ffn) when its front is not an island:
-# "0" keeps the exported pair for an A/B.
-SHARED_FFN_JOIN = os.environ.get("VXPU_SHARED_FFN_JOIN", "1") != "0"
+# The shared expert joined back into one op (shared_ffn) when its front is not an island: "1" turns it on,
+# off by default. Measured on four RTX PRO 6000 (hero 10, Nov 1): 40 launches fewer a step (1,082 -> 1,042 at
+# one row) and the step unchanged at one row (13.3 ms) and nine (22.4 / 18.2 / 35.5 one prompt / same / different),
+# because the joined GEMV's hyper-connection epilogue costs what the combine kernel did (the w2 GEMV 10.6 ->
+# 12.9 us against the combine's 1.0); and the tokens are not the pair's: the epilogue sums the mix in another
+# order than the compiler's kernel, a rounding-level difference that moved the greedy choice at token 26 of
+# 64 at one row and in eight of nine rows at nine. Off until the epilogue and the combine agree bit for bit.
+SHARED_FFN_JOIN = os.environ.get("VXPU_SHARED_FFN_JOIN", "0") == "1"
 
 _FRONT, _COMBINE, _JOINED = "vxpu.shared_ffn_front.default", "vxpu.shared_ffn_combine.default", "vxpu.shared_ffn.default"
 
