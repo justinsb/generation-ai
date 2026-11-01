@@ -25,7 +25,7 @@ import torch.fx
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from . import lower
+from . import costs, lower
 
 
 def _stack(path):
@@ -197,3 +197,25 @@ class SiteBytes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoiseBandTest(unittest.TestCase):
+    """A fused body displaces the kernel only when it wins by more than the measurement's noise."""
+
+    def test_inside_the_band_keeps_the_kernel(self):
+        # the attn_out pair hero 11 found flipping between runs
+        chosen, why = costs.decide({"gpu-fused": 58.49, "gpu-triton": 57.60}, {"gpu-fused": 0.0}, "gpu-triton")
+        self.assertEqual(chosen, "gpu-triton")
+        self.assertIn("noise band", why)
+        chosen, _ = costs.decide({"gpu-fused": 56.6, "gpu-triton": 57.60}, {"gpu-fused": 1.0}, "gpu-triton")
+        self.assertEqual(chosen, "gpu-triton")  # 55.6 effective against 57.6 - 2.0: on the band, not under it
+
+    def test_a_clear_win_takes_the_fused_body(self):
+        chosen, why = costs.decide({"gpu-fused": 50.0, "gpu-triton": 57.60}, {"gpu-fused": 2.0}, "gpu-triton")
+        self.assertEqual(chosen, "gpu-fused")
+        self.assertIn("beats", why)
+        # a small kernel: the band is the microseconds floor, not the share
+        chosen, _ = costs.decide({"gpu-fused": 1.5, "gpu-triton": 3.0}, {"gpu-fused": 0.0}, "gpu-triton")
+        self.assertEqual(chosen, "gpu-triton")
+        chosen, _ = costs.decide({"gpu-fused": 0.9, "gpu-triton": 3.0}, {"gpu-fused": 0.0}, "gpu-triton")
+        self.assertEqual(chosen, "gpu-fused")

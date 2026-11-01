@@ -1,0 +1,996 @@
+{
+ "blocks": [
+  {
+   "blocks": {
+    "BK": 128,
+    "BN": 32,
+    "KSPLIT": 8,
+    "stages": 4,
+    "warps": 2
+   },
+   "bytes": 23625888,
+   "efficiency": 0.929,
+   "floor_us": 16.2,
+   "shapes": "dual_gemv_swiglu rows=1 n=2304 k=5120 w=fp8 native=1",
+   "us": 17.44,
+   "why": "206 candidates, 54 failed; the engine's own blocks 21.2 us"
+  },
+  {
+   "blocks": {
+    "BK": 128,
+    "BN": 32,
+    "KSPLIT": 8,
+    "stages": 4,
+    "warps": 2
+   },
+   "bytes": 23704992,
+   "efficiency": 0.919,
+   "floor_us": 16.22,
+   "shapes": "dual_gemv_swiglu rows=9 n=2304 k=5120 w=fp8 native=1",
+   "us": 17.66,
+   "why": "206 candidates, 54 failed; the engine's own blocks 21.6 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 32,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 4
+   },
+   "bytes": 42050856,
+   "efficiency": 0.962,
+   "floor_us": 28.77,
+   "shapes": "gemv_pe rows=1 n=32768 k=1280 w=fp8 epi=rotary hd=512 native=1 rd=64",
+   "us": 29.91,
+   "why": "26 candidates, 0 failed; the engine's own blocks 29.9 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 32,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 4
+   },
+   "bytes": 42585704,
+   "efficiency": 0.966,
+   "floor_us": 29.17,
+   "shapes": "gemv_pe rows=9 n=32768 k=1280 w=fp8 epi=rotary hd=512 native=1 rd=64",
+   "us": 30.18,
+   "why": "26 candidates, 0 failed; the engine's own blocks 30.8 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 4,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 6567840,
+   "efficiency": 0.615,
+   "floor_us": 4.49,
+   "shapes": "gemv_rows rows=1 n=1280 k=5120 w=fp8 native=1 split=1",
+   "us": 7.31,
+   "why": "248 candidates, 0 failed; the engine's own blocks 7.5 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 64,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 4
+   },
+   "bytes": 1324354560,
+   "efficiency": 1.051,
+   "floor_us": 907.01,
+   "shapes": "gemv_rows rows=1 n=129280 k=5120 w=bf16 out=f32",
+   "us": 863.21,
+   "why": "50 candidates, 5 failed; the engine's own blocks 863.2 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 4
+   },
+   "bytes": 157497536,
+   "efficiency": 1.018,
+   "floor_us": 107.77,
+   "shapes": "gemv_rows rows=1 n=25600 k=6144 w=fp8 native=1",
+   "us": 105.9,
+   "why": "50 candidates, 0 failed; the engine's own blocks 105.9 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 5257512,
+   "efficiency": 0.593,
+   "floor_us": 3.6,
+   "shapes": "gemv_rows rows=1 n=4096 k=1280 w=fp8 native=1",
+   "us": 6.07,
+   "why": "56 candidates, 0 failed; the engine's own blocks 8.1 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 4,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 2630304,
+   "efficiency": 0.563,
+   "floor_us": 1.8,
+   "shapes": "gemv_rows rows=1 n=512 k=5120 w=fp8 native=1 split=1",
+   "us": 3.2,
+   "why": "254 candidates, 0 failed; the engine's own blocks 3.4 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 11820616,
+   "efficiency": 0.777,
+   "floor_us": 8.09,
+   "shapes": "gemv_rows rows=1 n=5120 k=2304 w=fp8 native=1",
+   "us": 10.41,
+   "why": "56 candidates, 0 failed; the engine's own blocks 10.6 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 4,
+    "warps": 4
+   },
+   "bytes": 42094848,
+   "efficiency": 0.93,
+   "floor_us": 28.86,
+   "shapes": "gemv_rows rows=1 n=5120 k=8192 w=fp8 epi=hc4 native=1",
+   "us": 31.04,
+   "why": "50 candidates, 0 failed; the engine's own blocks 31.1 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 32,
+    "KSPLIT": 1,
+    "stages": 4,
+    "warps": 4
+   },
+   "bytes": 33637376,
+   "efficiency": 0.942,
+   "floor_us": 23.06,
+   "shapes": "gemv_rows rows=1 n=8192 k=4096 w=fp8 epi=quant groups=8 native=1",
+   "us": 24.49,
+   "why": "34 candidates, 0 failed; the engine's own blocks 24.7 us"
+  },
+  {
+   "blocks": {
+    "BK": 512,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 6630560,
+   "efficiency": 0.536,
+   "floor_us": 4.54,
+   "shapes": "gemv_rows rows=9 n=1280 k=5120 w=fp8 native=1",
+   "us": 8.47,
+   "why": "74 candidates, 0 failed; the engine's own blocks 10.4 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 4,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 6630560,
+   "efficiency": 0.621,
+   "floor_us": 4.54,
+   "shapes": "gemv_rows rows=9 n=1280 k=5120 w=fp8 native=1 split=1",
+   "us": 7.31,
+   "why": "248 candidates, 0 failed; the engine's own blocks 7.3 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 64,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 8
+   },
+   "bytes": 1328573440,
+   "efficiency": 1.042,
+   "floor_us": 909.9,
+   "shapes": "gemv_rows rows=9 n=129280 k=5120 w=bf16 out=f32",
+   "us": 873.19,
+   "why": "50 candidates, 5 failed; the engine's own blocks 874.4 us"
+  },
+  {
+   "blocks": {
+    "BK": 512,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 11896992,
+   "efficiency": 0.734,
+   "floor_us": 8.15,
+   "shapes": "gemv_rows rows=9 n=2304 k=5120 w=fp8 native=1",
+   "us": 11.1,
+   "why": "74 candidates, 0 failed; the engine's own blocks 12.1 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 4
+   },
+   "bytes": 157957824,
+   "efficiency": 1.012,
+   "floor_us": 108.18,
+   "shapes": "gemv_rows rows=9 n=25600 k=6144 w=fp8 native=1",
+   "us": 106.9,
+   "why": "50 candidates, 0 failed; the engine's own blocks 106.9 us"
+  },
+  {
+   "blocks": {
+    "BK": 128,
+    "BN": 64,
+    "KSPLIT": 1,
+    "stages": 4,
+    "warps": 4
+   },
+   "bytes": 42585704,
+   "efficiency": 0.98,
+   "floor_us": 29.15,
+   "shapes": "gemv_rows rows=9 n=32768 k=1280 w=fp8 native=1",
+   "us": 29.74,
+   "why": "38 candidates, 0 failed; the engine's own blocks 30.8 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 4
+   },
+   "bytes": 5333608,
+   "efficiency": 0.589,
+   "floor_us": 3.65,
+   "shapes": "gemv_rows rows=9 n=4096 k=1280 w=fp8 native=1",
+   "us": 6.2,
+   "why": "56 candidates, 0 failed; the engine's own blocks 6.2 us"
+  },
+  {
+   "blocks": {
+    "BK": 512,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 2680736,
+   "efficiency": 0.306,
+   "floor_us": 1.84,
+   "shapes": "gemv_rows rows=9 n=512 k=5120 w=fp8 native=1",
+   "us": 5.99,
+   "why": "74 candidates, 0 failed; the engine's own blocks 7.5 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 4,
+    "stages": 3,
+    "warps": 4
+   },
+   "bytes": 2680736,
+   "efficiency": 0.517,
+   "floor_us": 1.84,
+   "shapes": "gemv_rows rows=9 n=512 k=5120 w=fp8 native=1 split=1",
+   "us": 3.55,
+   "why": "254 candidates, 0 failed; the engine's own blocks 3.5 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 3,
+    "warps": 2
+   },
+   "bytes": 11921544,
+   "efficiency": 0.76,
+   "floor_us": 8.16,
+   "shapes": "gemv_rows rows=9 n=5120 k=2304 w=fp8 native=1",
+   "us": 10.74,
+   "why": "56 candidates, 0 failed; the engine's own blocks 10.8 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 4,
+    "warps": 4
+   },
+   "bytes": 42981632,
+   "efficiency": 0.933,
+   "floor_us": 29.42,
+   "shapes": "gemv_rows rows=9 n=5120 k=8192 w=fp8 epi=hc4 native=1",
+   "us": 31.54,
+   "why": "50 candidates, 0 failed; the engine's own blocks 31.7 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 4,
+    "warps": 4
+   },
+   "bytes": 42152192,
+   "efficiency": 0.959,
+   "floor_us": 28.85,
+   "shapes": "gemv_rows rows=9 n=5120 k=8192 w=fp8 native=1",
+   "us": 30.1,
+   "why": "50 candidates, 0 failed; the engine's own blocks 30.3 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 32,
+    "KSPLIT": 1,
+    "stages": 4,
+    "warps": 4
+   },
+   "bytes": 34038784,
+   "efficiency": 0.962,
+   "floor_us": 23.3,
+   "shapes": "gemv_rows rows=9 n=8192 k=4096 w=fp8 epi=quant groups=8 native=1",
+   "us": 24.22,
+   "why": "34 candidates, 0 failed; the engine's own blocks 24.7 us"
+  },
+  {
+   "blocks": {
+    "BK": 256,
+    "BN": 16,
+    "KSPLIT": 1,
+    "stages": 4,
+    "warps": 4
+   },
+   "bytes": 34038784,
+   "efficiency": 0.956,
+   "floor_us": 23.3,
+   "shapes": "gemv_rows rows=9 n=8192 k=4096 w=fp8 groups=8 native=1",
+   "us": 24.36,
+   "why": "50 candidates, 0 failed; the engine's own blocks 24.4 us"
+  }
+ ],
+ "explain": [
+  "dual_gemv_swiglu rows=1 n=2304 k=5120 w=fp8 native=1 (138 a step): BK=128 BN=32 KSPLIT=8 stages=4 warps=2 17.4 us, floor 16.2, 93% of bandwidth, 82% of the engine's 21.2 us, 152 candidates",
+  "gemv_pe rows=1 n=32768 k=1280 w=fp8 epi=rotary hd=512 native=1 rd=64 (126 a step): BK=256 BN=32 KSPLIT=1 stages=3 warps=4 29.9 us, floor 28.8, 96% of bandwidth, 100% of the engine's 29.9 us, 26 candidates",
+  "gemv_rows rows=1 n=1280 k=5120 w=fp8 native=1 split=1 (126 a step): BK=256 BN=16 KSPLIT=4 stages=3 warps=2 7.3 us, floor 4.5, 62% of bandwidth, 98% of the engine's 7.5 us, 248 candidates",
+  "gemv_rows rows=1 n=129280 k=5120 w=bf16 out=f32 (8 a step): BK=256 BN=32 KSPLIT=1 stages=4 warps=4 863.1 us, floor 907.9, 105% of bandwidth, 100% of the engine's 863.5 us, 46 candidates",
+  "gemv_rows rows=1 n=25600 k=6144 w=fp8 native=1 (12 a step): BK=256 BN=16 KSPLIT=1 stages=3 warps=4 105.9 us, floor 107.8, 102% of bandwidth, 100% of the engine's 105.9 us, 50 candidates",
+  "gemv_rows rows=1 n=4096 k=1280 w=fp8 native=1 (39 a step): BK=256 BN=16 KSPLIT=1 stages=3 warps=2 6.1 us, floor 3.6, 59% of bandwidth, 75% of the engine's 8.1 us, 56 candidates",
+  "gemv_rows rows=1 n=512 k=5120 w=fp8 native=1 split=1 (123 a step): BK=256 BN=16 KSPLIT=4 stages=3 warps=2 3.2 us, floor 1.8, 56% of bandwidth, 93% of the engine's 3.4 us, 254 candidates",
+  "gemv_rows rows=1 n=5120 k=2304 w=fp8 native=1 (138 a step): BK=256 BN=16 KSPLIT=1 stages=3 warps=2 10.4 us, floor 8.1, 78% of bandwidth, 98% of the engine's 10.6 us, 56 candidates",
+  "gemv_rows rows=1 n=5120 k=8192 w=fp8 epi=hc4 native=1 (153 a step): BK=256 BN=16 KSPLIT=1 stages=4 warps=4 31.0 us, floor 28.9, 93% of bandwidth, 100% of the engine's 31.1 us, 50 candidates",
+  "gemv_rows rows=1 n=8192 k=4096 w=fp8 epi=quant groups=8 native=1 (153 a step): BK=256 BN=32 KSPLIT=1 stages=4 warps=4 24.5 us, floor 23.1, 94% of bandwidth, 99% of the engine's 24.7 us, 34 candidates",
+  "the GEMV classes measured: 35.62 GB a step at the record's counts, 25.83 ms a step under the chosen blocks",
+  "dual_gemv_swiglu rows=9 n=2304 k=5120 w=fp8 native=1 (148 a step): BK=128 BN=32 KSPLIT=8 stages=4 warps=2 17.7 us, floor 16.2, 92% of bandwidth, 82% of the engine's 21.6 us, 152 candidates",
+  "gemv_pe rows=9 n=32768 k=1280 w=fp8 epi=rotary hd=512 native=1 rd=64 (134 a step): BK=256 BN=32 KSPLIT=1 stages=3 warps=4 30.2 us, floor 29.2, 97% of bandwidth, 98% of the engine's 30.8 us, 26 candidates",
+  "gemv_rows rows=1 n=129280 k=5120 w=bf16 out=f32 (7 a step): BK=256 BN=64 KSPLIT=1 stages=3 warps=4 863.2 us, floor 907.0, 105% of bandwidth, 100% of the engine's 863.2 us, 45 candidates",
+  "gemv_rows rows=9 n=1280 k=5120 w=fp8 native=1 (7 a step): BK=512 BN=16 KSPLIT=1 stages=3 warps=2 8.5 us, floor 4.5, 54% of bandwidth, 81% of the engine's 10.4 us, 74 candidates",
+  "gemv_rows rows=9 n=1280 k=5120 w=fp8 native=1 split=1 (134 a step): BK=256 BN=16 KSPLIT=4 stages=3 warps=2 7.3 us, floor 4.5, 62% of bandwidth, 99% of the engine's 7.3 us, 248 candidates",
+  "gemv_rows rows=9 n=129280 k=5120 w=bf16 out=f32 (6 a step): BK=256 BN=64 KSPLIT=1 stages=3 warps=8 873.2 us, floor 909.9, 104% of bandwidth, 100% of the engine's 874.4 us, 45 candidates",
+  "gemv_rows rows=9 n=2304 k=5120 w=fp8 native=1 (14 a step): BK=512 BN=16 KSPLIT=1 stages=3 warps=2 11.1 us, floor 8.2, 73% of bandwidth, 92% of the engine's 12.1 us, 74 candidates",
+  "gemv_rows rows=9 n=25600 k=6144 w=fp8 native=1 (16 a step): BK=256 BN=16 KSPLIT=1 stages=3 warps=4 106.9 us, floor 108.2, 101% of bandwidth, 100% of the engine's 106.9 us, 50 candidates",
+  "gemv_rows rows=9 n=32768 k=1280 w=fp8 native=1 (7 a step): BK=128 BN=64 KSPLIT=1 stages=4 warps=4 29.7 us, floor 29.1, 98% of bandwidth, 96% of the engine's 30.8 us, 38 candidates",
+  "gemv_rows rows=9 n=4096 k=1280 w=fp8 native=1 (92 a step): BK=256 BN=16 KSPLIT=1 stages=3 warps=4 6.2 us, floor 3.6, 59% of bandwidth, 100% of the engine's 6.2 us, 56 candidates",
+  "gemv_rows rows=9 n=512 k=5120 w=fp8 native=1 (7 a step): BK=512 BN=16 KSPLIT=1 stages=3 warps=2 6.0 us, floor 1.8, 31% of bandwidth, 80% of the engine's 7.5 us, 74 candidates",
+  "gemv_rows rows=9 n=512 k=5120 w=fp8 native=1 split=1 (189 a step): BK=256 BN=16 KSPLIT=4 stages=3 warps=4 3.5 us, floor 1.8, 52% of bandwidth, 100% of the engine's 3.5 us, 254 candidates",
+  "gemv_rows rows=9 n=5120 k=2304 w=fp8 native=1 (155 a step): BK=256 BN=16 KSPLIT=1 stages=3 warps=2 10.7 us, floor 8.2, 76% of bandwidth, 99% of the engine's 10.8 us, 56 candidates",
+  "gemv_rows rows=9 n=5120 k=8192 w=fp8 epi=hc4 native=1 (159 a step): BK=256 BN=16 KSPLIT=1 stages=4 warps=4 31.5 us, floor 29.4, 93% of bandwidth, 99% of the engine's 31.7 us, 50 candidates",
+  "gemv_rows rows=9 n=5120 k=8192 w=fp8 native=1 (7 a step): BK=256 BN=16 KSPLIT=1 stages=4 warps=4 30.1 us, floor 28.9, 96% of bandwidth, 99% of the engine's 30.3 us, 50 candidates",
+  "gemv_rows rows=9 n=8192 k=4096 w=fp8 epi=quant groups=8 native=1 (159 a step): BK=256 BN=32 KSPLIT=1 stages=4 warps=4 24.2 us, floor 23.3, 96% of bandwidth, 98% of the engine's 24.7 us, 34 candidates",
+  "gemv_rows rows=9 n=8192 k=4096 w=fp8 groups=8 native=1 (7 a step): BK=256 BN=16 KSPLIT=1 stages=4 warps=4 24.4 us, floor 23.3, 96% of bandwidth, 100% of the engine's 24.4 us, 50 candidates",
+  "the GEMV classes measured: 46.03 GB a step at the record's counts, 33.25 ms a step under the chosen blocks"
+ ],
+ "format": "vxpu-kernel-table/1",
+ "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+ "knobs": {
+  "FFN_FRONT_BD": 1024,
+  "FFN_FRONT_EB": 8,
+  "FP4_DIRECT_MAX": 8,
+  "FP4_NATIVE": true,
+  "FRONT_SPLIT_BD": 512,
+  "FRONT_SPLIT_EB": 8,
+  "GEMV_ROWS_MAX": 64
+ },
+ "sites": [
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.0.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.0.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.1.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.1.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.10.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.10.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.11.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.11.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.12.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.12.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.13.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.13.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.14.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.14.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.15.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.15.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.16.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.16.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.17.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.17.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.18.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.18.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.19.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.19.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.2.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.2.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.20.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.20.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.21.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.21.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.22.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.22.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.23.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.23.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.24.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.24.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.25.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.25.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.26.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.26.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.27.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.27.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.28.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.28.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.29.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.29.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.3.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.3.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.30.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.30.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.31.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.31.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.32.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.32.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.33.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.33.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.34.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.34.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.35.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.35.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.36.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.36.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.37.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.37.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.38.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.38.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.39.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.39.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.4.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.4.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.5.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.5.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.6.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.6.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.7.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.7.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.8.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.8.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.9.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_out",
+   "site": "model.layers.9.attn",
+   "why": "measured: gpu-fused 58.6 us, gpu-triton 57.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_q",
+   "shapes": "rows=1 dim=5120 rank=1280 heads=64x512",
+   "why": "measured: gpu-fused 52.7 us, gpu-triton 41.6 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_select",
+   "shapes": "queries=1 heads=64 d=512 t=128",
+   "why": "not measured: as the engine ran it (its registry's order)"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::attn_select",
+   "shapes": "queries=1 heads=64 d=512 t=640",
+   "why": "not measured: as the engine ran it (its registry's order)"
+  },
+  {
+   "impl": "gpu-triton-split",
+   "op": "vxpu::ffn_front",
+   "shapes": "rows=1 experts=384 k=6",
+   "why": "measured: gpu-fused 75.6 us, gpu-triton-split 13.3 us"
+  },
+  {
+   "impl": "gpu-fp8-gemv",
+   "op": "vxpu::fp8_linear",
+   "shapes": "1x1280->4096",
+   "why": "measured: gpu-fp8-gemv 7.6 us, gpu-fused 9.6 us"
+  },
+  {
+   "impl": "gpu-fp8-gemv",
+   "op": "vxpu::fp8_linear",
+   "shapes": "1x6144->25600",
+   "why": "measured: gpu-fp8-gemv 108.9 us, gpu-fused 143.9 us"
+  },
+  {
+   "impl": "gpu-triton-split",
+   "op": "vxpu::hc_front",
+   "shapes": "rows=1 hc=4",
+   "why": "measured: gpu-fused 48.6 us, gpu-triton-split 6.3 us"
+  },
+  {
+   "impl": "gpu-triton-bf16",
+   "op": "vxpu::head_linear",
+   "shapes": "1x5120->129280 bfloat16",
+   "why": "not measured: as the engine ran it (its registry's order)"
+  },
+  {
+   "impl": "gpu-fused",
+   "op": "vxpu::rotary",
+   "shapes": "1x1x32x64",
+   "why": "measured: gpu-fused 0.9 us, gpu-triton 2.7 us"
+  },
+  {
+   "impl": "gpu-fused",
+   "op": "vxpu::rotary",
+   "shapes": "1x1x64",
+   "why": "measured: gpu-fused 0.9 us, gpu-triton 2.6 us"
+  },
+  {
+   "impl": "gpu-fused",
+   "op": "vxpu::shared_ffn_combine",
+   "shapes": "rows=1 dim=5120 hc=4",
+   "why": "not measured: as the engine ran it (its registry's order)"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::shared_ffn_front",
+   "shapes": "rows=1 dim=5120 inter=2304",
+   "why": "measured: gpu-fused 38.9 us, gpu-triton 35.5 us"
+  },
+  {
+   "impl": "gpu-triton",
+   "op": "vxpu::window_kv",
+   "shapes": "rows=1 dim=5120 kv=512",
+   "why": "measured: gpu-fused 20.5 us, gpu-triton 8.3 us"
+  }
+ ]
+}

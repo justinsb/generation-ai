@@ -389,6 +389,27 @@ def load_table(text):
                               f"{where[key]['impl']} for the same {key}")
         where[key] = entry
     table["index"] = index
+    # the GEMV templates' blocks per shape class (triton_ops.gemv_blocks): what `vxpu kernels measure` chose
+    blocks = table.get("blocks") or []
+    if not isinstance(blocks, list):
+        raise ConfigError("VXPU_PLAN_TABLE: blocks must be a list")
+    from . import triton_ops
+    seen = {}
+    for i, entry in enumerate(blocks):
+        key = entry.get("shapes") if isinstance(entry, dict) else None
+        values = entry.get("blocks") if isinstance(entry, dict) else None
+        if not isinstance(key, str) or not key or not isinstance(values, dict) or not values:
+            raise ConfigError(f"VXPU_PLAN_TABLE: blocks[{i}] needs shapes (the shape class) and blocks (an object)")
+        for name, value in values.items():
+            if name not in triton_ops.GEMV_BLOCK_NAMES:
+                raise ConfigError(f"VXPU_PLAN_TABLE: blocks[{i}] ({key}): unknown block {name!r} "
+                                  f"(known: {', '.join(triton_ops.GEMV_BLOCK_NAMES)})")
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigError(f"VXPU_PLAN_TABLE: blocks[{i}] ({key}): {name} must be a positive integer, got {value!r}")
+        if key in seen and seen[key] != values:
+            raise ConfigError(f"VXPU_PLAN_TABLE: blocks[{i}] names {key} again with other blocks")
+        seen[key] = dict(values)
+    table["blocks_index"] = seen
     return table
 
 
@@ -423,6 +444,15 @@ def apply_knobs(knobs):
     cached = getattr(triton_ops, "_fp4_native", None)  # memoized per device from FP4_NATIVE
     if cached is not None and hasattr(cached, "cache_clear"):
         cached.cache_clear()
+
+
+def apply_blocks(blocks):
+    """Set the GEMV templates' blocks per shape class from the table (triton_ops.GEMV_BLOCKS,
+    read at each call, so in effect for everything launched afterwards)."""
+    from . import triton_ops
+    triton_ops.GEMV_BLOCKS.clear()
+    if blocks:
+        triton_ops.GEMV_BLOCKS.update({k: dict(v) for k, v in blocks.items()})
 
 
 def effective_knobs():
@@ -612,8 +642,11 @@ class Plan:
                 raise ConfigError(f"VXPU_PLAN_TABLE: the table is for {wanted!r}, this engine runs on "
                                   f"{self.hardware['gpu']!r}")
             apply_knobs(self.table.get("knobs"))
+            apply_blocks(self.table.get("blocks_index"))
         sites = len(self.table.get("sites") or []) if self.table else 0
-        self._set("plan_table", (f"{sites} entries, {len(self.table.get('knobs') or {})} knobs" if self.table else None),
+        nblocks = len(self.table.get("blocks_index") or {}) if self.table else 0
+        self._set("plan_table", (f"{sites} entries, {len(self.table.get('knobs') or {})} knobs, {nblocks} block classes"
+                                 if self.table else None),
                   src, (), "the kernel table (inline JSON or a file): which implementation body each call site runs "
                   "and the kernels' knobs; an engine given one applies it exactly and measures nothing "
                   "(plan.py: load_table; the planner writes it, pkg/kernelplan)")
@@ -805,6 +838,12 @@ class Plan:
         with self._lock:
             sites = [dict(e) for e in self.sites]
             stats = dict(self.stats)
+        try:
+            from . import triton_ops
+            # the GEMV shape classes launched so far, with the blocks that ran (the measuring step's input)
+            stats["gemv_classes"] = {k: dict(v, blocks=dict(v["blocks"])) for k, v in triton_ops.GEMV_CLASSES.items()}
+        except ImportError:
+            pass
         return {
             "format": RECORD_FORMAT,
             "hardware": hw,
