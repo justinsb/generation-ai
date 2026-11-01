@@ -2151,9 +2151,10 @@ class _NativeRows:
 
 
 class _PipelineRows:
-    """Several batches in flight (hero run 9). Batch 0 is the engine's own captured step graph
-    bound to the resident state; every other batch gets a state of its own (zeros shaped and
-    placed like the resident tensors) and step graphs captured against it (Engine._pipeline_graph).
+    """Several batches in flight (hero run 9). Every batch gets a state of its own (zeros shaped
+    and placed like the resident tensors) and step graphs captured against it
+    (Engine._pipeline_graph); the engine's own graph, bound to the resident state, stays out
+    (see bind).
     Each batch decodes on a native loop of its own, launching on streams of its own per GPU: with
     the layers sharded, the GPUs then run different batches' ranges at once, a batch's graph on
     GPU k waiting (a stream memory wait) for its own range k-1 while another batch's range k runs.
@@ -2169,30 +2170,34 @@ class _PipelineRows:
         self.rows = e.binding.get("batch", 1)
         if e._resident is None:
             raise RuntimeError("batches in flight need the resident state of a split decode")
-        self.states = [e._resident]
-        self.graphs = [e._decode_split]
+        self.states = []
+        self.graphs = []
         self.loops = []
         self.requests = [{} for _ in range(batches)]
         self._streams = []
 
     def bind(self):
         """Inside the engine's external scope (the captures resolve the experts and tables through
-        it): the other batches' states and step graphs, then a loop per batch."""
+        it): every batch's state and step graphs, then a loop per batch. Batch 0 does not run on
+        the engine's own graph (the one the warm-up captured on the resident state): beside
+        another batch's graph that one produced other tokens at nine rows of different prompts
+        (hero run 10; its own graph captured by _pipeline_graph never did), so each batch gets a
+        state and graph made the same way."""
         e = self.engine
         started = time.perf_counter()
-        cache = e.__dict__.setdefault("_pipeline_graphs", [])  # (state, graph) per extra batch, kept across calls
+        cache = e.__dict__.setdefault("_pipeline_graphs", [])  # (state, graph) per batch, kept across calls
         built = 0
-        for b in range(1, self.n):
-            if len(cache) < b:
+        for b in range(self.n):
+            if len(cache) <= b:
                 state = {fqn: torch.zeros_like(t) for fqn, t in e._resident.items()}
                 cache.append((state, e._pipeline_graph(state)))
                 built += 1
-            state, graph = cache[b - 1]
+            state, graph = cache[b]
             self.states.append(state)
             self.graphs.append(graph)
         nbytes = sum(t.numel() * t.element_size() for t in e._resident.values())
         print(f"[vxpu] batches in flight: {self.n}, each {self.rows} rows; state {nbytes / 1e9:.2f} GB a batch; "
-              f"{built} more step graphs captured in {time.perf_counter() - started:.1f} s", flush=True)
+              f"{built} step graphs captured in {time.perf_counter() - started:.1f} s", flush=True)
         trace = os.environ.get("VXPU_STEP_TRACE")
         for b, graph in enumerate(self.graphs):
             devices = graph.native_parts()[4]
@@ -2203,7 +2208,7 @@ class _PipelineRows:
             self.loops.append(graph.native_loop(draft=None, streams=streams))
         if trace:
             os.environ["VXPU_STEP_TRACE"] = trace
-        e._current = {"id": "pipeline", "state": self.states[0]}
+        e._current = {"id": "pipeline", "state": e._resident}
 
     def active(self):
         return any(self.requests)
@@ -2262,7 +2267,7 @@ class _PipelineRows:
     def close(self):
         for loop in self.loops:
             loop.stop()
-        self.engine._rebind(self.states[0])  # the split points at the resident state again
+        self.engine._rebind(self.engine._resident)  # the split points at the resident state again
 
 
 class _ModelDrafter:
