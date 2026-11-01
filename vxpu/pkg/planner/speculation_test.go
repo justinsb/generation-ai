@@ -38,8 +38,9 @@ func fixed(k int) kernelplan.Speculation {
 	return kernelplan.Speculation{Draft: k, Policy: kernelplan.PolicyFixed}
 }
 
-// The measured speculative steps (hero 8's machine, the m14 tree, Oct 31
-// 2026): the calibration and its error.
+// The measured speculative steps (hero 8's machine; one row at 2 and 5
+// drafts from hero 8's m14 tree on Oct 31, the rest from pod hero-d on
+// Nov 1): the calibration and its error.
 func TestPredictSpeculation_CalibrationOnHero8(t *testing.T) {
 	lb := drafterLayers(t)
 	p := hero8Plan(t, 1)
@@ -50,13 +51,14 @@ func TestPredictSpeculation_CalibrationOnHero8(t *testing.T) {
 		draft      int
 		measuredMs float64
 		tokens     float64
+		distinct   float64 // measured, 0 when not
 		tol        float64
 	}{
-		{"one row, 4 drafts", 1, MixSame, 4, 25.8, 2.67, 0.10},
-		{"one row, 2 drafts", 1, MixSame, 2, 23.9, 2.21, 0.10},
-		{"one row, 5 drafts", 1, MixSame, 5, 29.5, 2.46, 0.10},
-		{"8 rows, one prompt, 4 drafts", 8, MixSame, 4, 42.9, 2.37, 0.10},
-		{"8 rows, a prompt per row, 4 drafts", 8, MixDifferent, 4, 97.1, 2.71, 0.10},
+		{"one row, 4 drafts", 1, MixSame, 4, 25.8, 2.67, 18.3, 0.10},
+		{"one row, 2 drafts", 1, MixSame, 2, 23.9, 2.21, 0, 0.10},
+		{"one row, 5 drafts", 1, MixSame, 5, 29.5, 2.46, 0, 0.10},
+		{"8 rows, one prompt, 4 drafts", 8, MixSame, 4, 40.4, 2.67, 18.7, 0.10},
+		{"8 rows, a prompt per row, 4 drafts", 8, MixDifferent, 4, 95.1, 2.69, 83.2, 0.10},
 	}
 	for _, c := range cases {
 		pr, err := PredictSpeculation(lb, p, Workload{Rows: c.rows, Batches: 1}, c.mix, fixed(c.draft), RTXPro6000, RTXPro6000Spec, DeepSeekV41FlashAcceptance)
@@ -65,6 +67,9 @@ func TestPredictSpeculation_CalibrationOnHero8(t *testing.T) {
 		}
 		within(t, c.name+" (ms)", pr.StepMs, c.measuredMs, c.tol)
 		within(t, c.name+" (tokens a step)", pr.TokensPerStep, c.tokens, 0.16)
+		if c.distinct > 0 {
+			within(t, c.name+" (distinct experts a layer)", pr.Distinct, c.distinct, 0.10)
+		}
 		t.Logf("%-38s predicted %5.1f ms, measured %5.1f; %.2f tokens a step, measured %.2f; %.0f distinct experts a layer; %.0f tok/s",
 			c.name, pr.StepMs, c.measuredMs, pr.TokensPerStep, c.tokens, pr.Distinct, pr.AggregateTokS)
 	}
@@ -88,19 +93,20 @@ func TestDistinctExperts_FollowsTheMeasuredPoints(t *testing.T) {
 	if got := DistinctExperts(6, 384, 100000, MixDifferent); got != 384 {
 		t.Errorf("many rows: %.1f, want every expert", got)
 	}
-	// the token curve: one row's five token rows read the measured 18.3; a batch of one
-	// prompt in every row reads the same; eight different prompts at five tokens grow from their 33.8
-	if got := DistinctExpertsOfVerify(6, 384, 1, 5, MixSame); got < 18.2 || got > 18.4 {
-		t.Errorf("one row, five token rows: %.1f distinct experts, want the measured 18.3", got)
+	// the token curve: one row's five token rows read the measured 18.3 (within 10%); a batch of one
+	// prompt in every row reads the same; eight different prompts at five tokens read the measured 83.2
+	if got := DistinctExpertsOfVerify(6, 384, 1, 5, MixSame); got < 16.5 || got > 20.1 {
+		t.Errorf("one row, five token rows: %.1f distinct experts, want the measured 18.3 within 10%%", got)
 	}
 	if a, b := DistinctExpertsOfVerify(6, 384, 8, 5, MixSame), DistinctExpertsOfVerify(6, 384, 1, 5, MixSame); a != b {
 		t.Errorf("eight rows of one prompt at five tokens read %.1f, one row %.1f: want the same", a, b)
 	}
-	if got := DistinctExpertsOfVerify(6, 384, 8, 5, MixDifferent); got < 100 || got > 106 {
-		t.Errorf("eight different prompts at five tokens: %.1f, want about 103 (33.8 rows' experts times the token curve)", got)
+	if got := DistinctExpertsOfVerify(6, 384, 8, 5, MixDifferent); got < 75 || got > 91.5 {
+		t.Errorf("eight different prompts at five tokens: %.1f, want the measured 83.2 within 10%%", got)
 	}
-	t.Logf("66 rows %.0f, 99 rows %.0f, 132 rows %.0f distinct experts a layer (extrapolated)",
-		DistinctExperts(6, 384, 66, MixDifferent), DistinctExperts(6, 384, 99, MixDifferent), DistinctExperts(6, 384, 132, MixDifferent))
+	if got := DistinctExpertsOfVerify(6, 384, 33, 5, MixDifferent); got >= 384 || got <= 90.3 {
+		t.Errorf("33 different prompts at five tokens: %.1f, want between the rows' 90.3 and the layer's 384", got)
+	}
 }
 
 func TestAcceptance_FitAndTokens(t *testing.T) {
@@ -118,10 +124,10 @@ func TestAcceptance_FitAndTokens(t *testing.T) {
 
 // The choice at each load of hero 10's matrix. The drafter pays at one
 // row (few experts read, the verify's token rows add theirs while the step
-// is launch-bound); at 33 rows a batch the token rows' own cost outweighs
-// the tokens they yield with one prompt in every row, and the model calls
-// it close to even with a prompt per row (two drafts under the experts
-// policy ahead by its estimated saving): the crossover hero 10 measures.
+// is launch-bound); at 33 rows a batch the token rows' own cost nearly
+// cancels the tokens they yield, and the model calls two drafts and none
+// within about 10% of each other under either prompt mix: the crossover
+// hero 10 measures, not one the model can call from this calibration.
 func TestChooseShape_Hero10Loads(t *testing.T) {
 	lb := drafterLayers(t)
 	p := hero8Plan(t, 4)
@@ -132,8 +138,6 @@ func TestChooseShape_Hero10Loads(t *testing.T) {
 	}{
 		{Load{Rows: 1, Mix: MixSame, Drafter: true, MaxDraft: 5}, true, 1},
 		{Load{Rows: 4, Mix: MixDifferent, Drafter: true, MaxDraft: 5}, true, 4},
-		{Load{Rows: 132, Mix: MixDifferent, Drafter: true, MaxDraft: 5}, true, 4},
-		{Load{Rows: 132, Mix: MixSame, Drafter: true, MaxDraft: 5}, false, 4},
 		{Load{Rows: 132, Mix: MixDifferent, Drafter: false}, false, 4},
 	}
 	for _, c := range loads {
@@ -159,6 +163,26 @@ func TestChooseShape_Hero10Loads(t *testing.T) {
 			if o.Prediction.AggregateTokS > o.Prediction.Pipeline.FloorTokS*o.Prediction.TokensPerStep*1.001 {
 				t.Errorf("%s: predicted %.0f tok/s above its floor %.0f", o.Describe(), o.Prediction.AggregateTokS, o.Prediction.Pipeline.FloorTokS*o.Prediction.TokensPerStep)
 			}
+		}
+	}
+	// four batches of 33: the model's call between two drafts and none is within its error
+	for _, mix := range []string{MixSame, MixDifferent} {
+		options, err := ChooseShape(lb, p, Load{Rows: 132, Mix: mix, Batches: 4, Drafter: true, MaxDraft: 5}, RTXPro6000, RTXPro6000Spec, DeepSeekV41FlashAcceptance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plain, two float64
+		for _, o := range options {
+			switch {
+			case o.Speculation == nil:
+				plain = o.Prediction.AggregateTokS
+			case o.Speculation.Draft == 2 && o.Speculation.Policy == kernelplan.PolicyFixed:
+				two = o.Prediction.AggregateTokS
+			}
+		}
+		t.Logf("four batches of 33 %s prompts: %.0f tok/s plain, %.0f with two drafts; the planner picks %s", mix, plain, two, options[0].Describe())
+		if two < plain*0.85 || two > plain*1.25 {
+			t.Errorf("four batches of 33 %s prompts: two drafts %.0f tok/s against %.0f plain; the calibration should leave these close, or the comment above is stale", mix, two, plain)
 		}
 	}
 	// a latency bound rejects the shapes over it and says so

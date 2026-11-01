@@ -38,10 +38,12 @@ import (
 // tokens 42.9 ms with one prompt in every row and 97.1 ms with a prompt per
 // row (2.37 and 2.71 tokens a step). The distinct experts a layer a batch
 // reads: 6 at one row or one prompt, 37.3 at 9 different prompts, 90.3 at
-// 33 (VXPU_EXPERT_STATS=1, hero 9's runs); the five token rows of one
-// row's verify read 18.3 (Nov 1, pod hero-d, specm5-b1): consecutive
-// tokens of a row overlap more than rows of different prompts do (22.9 on
-// the rows curve) and far more than independent draws would (29).
+// 33 (VXPU_EXPERT_STATS=1, hero 9's runs). With five tokens a step (Nov 1,
+// pod hero-d, the specm5 artifacts): one row reads 18.3 distinct experts a
+// layer in 25.8 ms, eight rows of one prompt 18.7 in 40.4 ms (2.67 tokens
+// a step), eight different prompts 83.2 in 95.1 ms (2.69): consecutive
+// tokens of a row overlap more than rows of different prompts do and far
+// more than independent draws would (29 at one row).
 
 // SpecCost is what a speculative step costs beyond the pipeline model.
 type SpecCost struct {
@@ -68,12 +70,11 @@ type SpecCost struct {
 	PreferGain float64
 }
 
-// RTXPro6000Spec is the speculative step's calibration on hero 8's
-// machine: with the distinct experts of the verify's token rows from the
-// measured token curve (DistinctExpertsOfVerify), the drafter's step and
-// the token rows' cost fit the five measured cases within 10%
-// (speculation_test.go).
-var RTXPro6000Spec = SpecCost{DrafterStepMs: 3.0, PerDraftRowMs: 0.45, ConfidencePrecision: 0.5, ConfidenceLoss: 0.1, PreferGain: 0.25}
+// RTXPro6000Spec is the speculative step's calibration: with the distinct
+// experts of the verify's token rows from the measured token curve
+// (DistinctExpertsOfVerify), the drafter's step and the token rows' cost
+// fit the five measured cases within 10% (speculation_test.go).
+var RTXPro6000Spec = SpecCost{DrafterStepMs: 3.5, PerDraftRowMs: 0.35, ConfidencePrecision: 0.5, ConfidenceLoss: 0.1, PreferGain: 0.25}
 
 // Acceptance is the drafter's per-position acceptance rate: a draft at
 // position i (after i-1 accepted drafts) is accepted with probability
@@ -154,22 +155,26 @@ func DistinctExperts(topK, experts int, n int, mix string) float64 {
 	return float64(topK)
 }
 
-// tokenCurve is the distinct experts a layer the t consecutive token rows
-// of one row's verify select, as a power of t fitted to the measured 18.3
-// at five tokens (top-6 of 384): 6 * t^0.69.
-const tokenCurve = 0.693
+// tokenCurve: t consecutive token rows of a row's verify select experts
+// as if the row's first token were drawn t^0.65 times from the experts
+// it does not yet read. Measured Nov 1 (pod hero-d, VXPU_EXPERT_STATS=1):
+// one row at five tokens reads 18.3 distinct experts a layer (the form
+// gives 17.0), eight different prompts at five tokens 83.2 (88.8).
+const tokenCurve = 0.65
 
 // DistinctExpertsOfVerify is the distinct experts a layer a verify of rows
-// rows with tokens token rows each reads: the rows' count for their first
-// tokens (DistinctExperts) times the token curve's growth, never more than
-// the layer has. With one prompt in every row the rows read the same, so
-// it is the token curve alone.
+// rows with tokens token rows each reads: the rows' count D for their
+// first tokens (DistinctExperts), grown toward the layer's E experts as
+// E - (E - D) (1 - D/E)^(tokens^tokenCurve - 1), so the growth saturates
+// where the rows already read most of the layer. With one prompt in every
+// row the rows read the same and the growth is one row's.
 func DistinctExpertsOfVerify(topK, experts, rows int, tokens float64, mix string) float64 {
-	rowsDistinct := DistinctExperts(topK, experts, rows, mix)
+	d := DistinctExperts(topK, experts, rows, mix)
 	if tokens <= 1 {
-		return rowsDistinct
+		return d
 	}
-	return math.Min(rowsDistinct*math.Pow(tokens, tokenCurve), float64(experts))
+	e := float64(experts)
+	return e - (e-d)*math.Pow(1-d/e, math.Pow(tokens, tokenCurve)-1)
 }
 
 // SpecPrediction is what the model predicts for a speculating pipeline.

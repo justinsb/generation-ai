@@ -198,9 +198,9 @@ func runPlanMatrix(ctx context.Context, args []string) error {
 		Pipeline: kernelplan.Pipeline{Batches: 1, Schedule: kernelplan.ScheduleRangeOrder}}
 	// the loads of hero 10's table: rows in all, the mix, the batches in
 	// flight (0: the planner chooses between one batch and one per range)
-	// and whether the drafter artifact exists for them (specm5-b1 and -b8:
-	// one and eight rows a batch; the plain artifacts at 9, 33 and the wide
-	// batches)
+	// and whether a drafter artifact exists for them (specm5-b1 and -b8: one
+	// and eight rows a batch; specm5x-b33 for 33, which the batched-drafter
+	// workstream exports; the plain artifacts at 9 and the wide batches)
 	type load struct {
 		rows    int
 		mix     string
@@ -212,10 +212,10 @@ func runPlanMatrix(ctx context.Context, args []string) error {
 		{8, planner.MixSame, 1, true}, {8, planner.MixDifferent, 1, true},
 		{32, planner.MixSame, 4, true}, {32, planner.MixDifferent, 4, true},
 		{9, planner.MixSame, 1, false}, {9, planner.MixDifferent, 1, false},
-		{33, planner.MixSame, 1, false}, {33, planner.MixDifferent, 1, false},
+		{33, planner.MixSame, 1, true}, {33, planner.MixDifferent, 1, true},
 		{66, planner.MixSame, 1, false}, {66, planner.MixDifferent, 1, false},
 		{99, planner.MixSame, 1, false}, {99, planner.MixDifferent, 1, false},
-		{132, planner.MixSame, 0, false}, {132, planner.MixDifferent, 0, false},
+		{132, planner.MixSame, 0, true}, {132, planner.MixDifferent, 0, true},
 	}
 	var cases []matrixCase
 	for _, l := range loads {
