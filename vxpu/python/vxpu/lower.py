@@ -263,7 +263,8 @@ def kernel_digest():
     the same source, the same graph, a different step)."""
     from . import plan
     knobs = repr(sorted(plan.effective_knobs().items()))
-    return hashlib.sha256((inspect.getsource(triton_ops) + knobs).encode()).hexdigest()[:16]
+    blocks = repr(sorted((k, sorted(v.items())) for k, v in triton_ops.GEMV_BLOCKS.items()))  # the table's blocks per class
+    return hashlib.sha256((inspect.getsource(triton_ops) + knobs + blocks).encode()).hexdigest()[:16]
 
 
 def key_cache_dir():

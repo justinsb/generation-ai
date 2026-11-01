@@ -61,6 +61,10 @@ type Table struct {
 	// FP4_NATIVE, ...): integers and booleans, as the engine checks them.
 	Knobs map[string]any `json:"knobs,omitempty"`
 	Sites []Entry        `json:"sites"`
+	// Blocks are the GEMV templates' tiles per shape class, chosen by the
+	// measuring step (measure.go); the engine applies them per class
+	// (triton_ops.gemv_blocks).
+	Blocks []BlockEntry `json:"blocks,omitempty"`
 	// Explain says why, line by line; the engine does not read it.
 	Explain []string `json:"explain,omitempty"`
 }
@@ -159,6 +163,16 @@ func ReadTable(data []byte) (*Table, error) {
 			return nil, err
 		}
 	}
+	for i, b := range t.Blocks {
+		if b.Shapes == "" || len(b.Blocks) == 0 {
+			return nil, fmt.Errorf("kernel table: blocks[%d] needs shapes and blocks", i)
+		}
+		for name, v := range b.Blocks {
+			if !blockNames[name] || v < 1 {
+				return nil, fmt.Errorf("kernel table: blocks[%d] (%s): %s=%d is not a block the engine knows (BN, BK, KSPLIT, warps, stages; positive)", i, b.Shapes, name, v)
+			}
+		}
+	}
 	seen := map[string]string{}
 	for i, e := range t.Sites {
 		if e.Op == "" || e.Impl == "" {
@@ -186,6 +200,7 @@ func ReadTableFile(path string) (*Table, error) {
 // order (op, then site, then shapes).
 func (t *Table) Write() ([]byte, error) {
 	t.Format = TableFormat
+	sort.SliceStable(t.Blocks, func(i, j int) bool { return t.Blocks[i].Shapes < t.Blocks[j].Shapes })
 	sort.SliceStable(t.Sites, func(i, j int) bool {
 		a, b := t.Sites[i], t.Sites[j]
 		if a.Op != b.Op {
@@ -247,6 +262,9 @@ func (e Entry) key() string {
 	}
 	return e.Op
 }
+
+// blockNames are the GEMV tiles a table may set per shape class (python/vxpu/triton_ops.py: GEMV_BLOCK_NAMES).
+var blockNames = map[string]bool{"BN": true, "BK": true, "KSPLIT": true, "warps": true, "stages": true}
 
 // Knobs the engine knows, by type: "int" or "bool" (python/vxpu/plan.py:
 // KNOBS). A table with another knob, or a wrong type, is refused there.
