@@ -294,6 +294,9 @@ KNOBS = {
     "GEMV_ROWS_MAX": int, "FP4_DIRECT_MAX": int, "FFN_FRONT_EB": int, "FFN_FRONT_BD": int,
     "FRONT_SPLIT_BD": int, "FRONT_SPLIT_EB": int, "FP4_KSPLIT": int, "FP4_NATIVE": bool, "FP4_DIRECT": bool,
     "MXFP8_RECODE": bool,  # the native GEMV bodies recode x in their prologue (true) or in a launch before each (default)
+    # the direct fp4 expert kernels' tiles: rows a program, K an iteration, warps, pipeline stages
+    "FP4_GU_BN": int, "FP4_GU_BK": int, "FP4_GU_WARPS": int, "FP4_GU_STAGES": int,
+    "FP4_DN_BN": int, "FP4_DN_BK": int, "FP4_DN_WARPS": int, "FP4_DN_STAGES": int,
 }
 
 

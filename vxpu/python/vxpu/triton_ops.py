@@ -2162,13 +2162,16 @@ if triton is not None:
         one-live-row dot from stalling them)."""
         live_m = tl.arange(0, BM) == 0
         acc = tl.zeros((BM, BN), dtype=tl.float32)
-        if TMA:
-            wd = tl.make_tensor_descriptor(w_ptr, shape=[NROWS, K // 2], strides=[K // 2, 1], block_shape=[BN, BK // 2])
+        if TMA:  # w_ptr is the bank's descriptor (made on the host, _fp4_descriptor)
             base = tl.min(bank_rows, axis=0).to(tl.int32)
         for k0 in range(0, K, BK):
-            x = tl.load(x_ptr + tok * K + k0 + tl.arange(0, BK)[None, :], mask=live_m[:, None], other=0.0)
+            # x's one live row, loaded once and broadcast in registers: a [BM, BK] masked load of
+            # it was staged per pipeline stage (8 KB a stage at BK 256, the weight tile's twice),
+            # which held the resident programs to four an SM and made a third stage a loss
+            xr = tl.load(x_ptr + tok * K + k0 + tl.arange(0, BK))
+            x = tl.where(live_m[:, None], xr[None, :], 0.0).to(tl.bfloat16)
             if TMA:
-                b = wd.load([base, k0 // 2])
+                b = w_ptr.load([base, k0 // 2])
                 e = _fp4_scales(s_ptr, bank_rows, live_n, k0, K // 32, BN, BK)
                 acc = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc)
             elif NATIVE:
@@ -2228,8 +2231,7 @@ if triton is not None:
             bank_rows = slot * D + rows
             w = tl.load(wt_ptr + p).to(tl.float32)
             live_m = tl.arange(0, BM) == 0
-            if TMA:  # the bytes through a descriptor over the bank's rows, as in _fp4_direct_one
-                wd = tl.make_tensor_descriptor(w2_ptr, shape=[NROWS, I // 2], strides=[I // 2, 1], block_shape=[BN, BK // 2])
+            if TMA:  # w2_ptr is the bank's descriptor (made on the host, _fp4_descriptor)
                 base = (slot * D + tile * BN).to(tl.int32)
             for i0 in range(0, I, BK):
                 offs = p.to(tl.int64) * I + i0 + tl.arange(0, BK)
@@ -2242,7 +2244,7 @@ if triton is not None:
                 h = tl.reshape(_quant_tile(tl.reshape(h, (1, BK)), 1, BK), (BK,))
                 hx = tl.where(live_m[:, None], h[None, :], 0.0).to(tl.bfloat16)
                 if TMA:
-                    b2 = wd.load([base, i0 // 2])
+                    b2 = w2_ptr.load([base, i0 // 2])
                     e2 = _fp4_scales(s2_ptr, bank_rows, live_n, i0, I // 32, BN, BK)
                     acc = tl.dot_scaled(hx, None, "bf16", tl.trans(b2), e2, "e2m1", acc)
                 elif NATIVE:
@@ -2350,8 +2352,28 @@ FP4_TMA = os.environ.get("VXPU_FP4_TMA")  # override: force the descriptor (1) o
 # the direct kernels' shapes with descriptor loads (rows a program, the K tile, warps, stages), measured cold at one
 # token on an RTX PRO 6000, bit-identical to the plain loads: gate/up 60.2 us for 75 MB (plain loads 75.6; floor 52),
 # down 30.6 us for 38 MB (plain 32.6; floor 26); the best of 36 and 36 shapes, each timed twice
-FP4_TMA_GATE_UP = (32, 256, 2, 2)
-FP4_TMA_DOWN = (32, 256, 2, 2)
+# The direct expert kernels' tiles (rows of the expert per program, K per iteration, warps, pipeline
+# stages), table knobs (plan.KNOBS): measured on an RTX PRO 6000 at six pairs with the L2 defeated
+# (hero run 11; the sweep over 108 sets per kernel is in dev/hero/fp4-sweep-rtx6000.json). Gate/up
+# with x as one row takes three stages (57.6 us for 75.2 MB, 1,305 GB/s, against 60.4 at two);
+# down is best at two (32.9 us for 37.6 MB; every other set measured slower).
+FP4_GU_BN, FP4_GU_BK, FP4_GU_WARPS, FP4_GU_STAGES = 32, 256, 2, 3
+FP4_DN_BN, FP4_DN_BK, FP4_DN_WARPS, FP4_DN_STAGES = 32, 256, 2, 2
+_FP4_DESCRIPTORS = {}
+
+
+def _fp4_descriptor(bank, rows, cols, bn, bk_bytes):
+    """The TMA descriptor over a bank seen as [rows, cols] bytes with boxes of [bn, bk_bytes], made
+    on the host once per bank and tile and passed to the kernels as an argument: a kernel making
+    its own per program paid about 1 us a launch (measured at six pairs). Keyed by the bank's
+    address and shape, which name its contents for the descriptor's purposes."""
+    key = (bank.data_ptr(), rows, cols, bn, bk_bytes)
+    d = _FP4_DESCRIPTORS.get(key)
+    if d is None:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+        d = TensorDescriptor.from_tensor(bank.view(rows, cols), block_shape=[bn, bk_bytes])
+        _FP4_DESCRIPTORS[key] = d
+    return d
 
 
 @functools.lru_cache(maxsize=None)
@@ -2521,8 +2543,8 @@ def _fp4_experts_direct(x_in, weights, slot_map, indices, start, w1, s1, w3, s3,
     BM = 16
     tma = native and _fp4_tma(dev.index) and (K // 2) % 16 == 0 and (I // 2) % 16 == 0  # descriptor strides: 16 bytes
     if tma:
-        bn1, bk1, warps1, stages1 = FP4_TMA_GATE_UP
-        bn2, bk2, warps2, stages2 = FP4_TMA_DOWN
+        bn1, bk1, warps1, stages1 = int(FP4_GU_BN), int(FP4_GU_BK), int(FP4_GU_WARPS), int(FP4_GU_STAGES)
+        bn2, bk2, warps2, stages2 = int(FP4_DN_BN), int(FP4_DN_BK), int(FP4_DN_WARPS), int(FP4_DN_STAGES)
     else:
         bn1, bk1, warps1, stages1 = 64, 256, 4, 3
         bn2, bk2, warps2, stages2 = 64, 256, 4, 3
@@ -2536,6 +2558,10 @@ def _fp4_experts_direct(x_in, weights, slot_map, indices, start, w1, s1, w3, s3,
     with torch.cuda.device(dev):
         bk1, bk2 = _block_k(K, bk1), _block_k(I, bk2)
         nt = triton.cdiv(K, bn2)
+        if tma:  # the banks go in as descriptors
+            w1 = _fp4_descriptor(w1, S * I, K // 2, bn1, bk1 // 2)
+            w3 = _fp4_descriptor(w3, S * I, K // 2, bn1, bk1 // 2)
+            w2 = _fp4_descriptor(w2, S * K, I // 2, bn2, bk2 // 2)
         _fp4_direct_gate_up_kernel[(pairs, triton.cdiv(I, bn1), 2)](
             x, idx, smap, start, w1, s1.view(torch.uint8), w3, s3.view(torch.uint8), g, u, I, K, topk, S * I,
             BM=BM, BN=bn1, BK=bk1, NATIVE=native, TMA=tma, num_warps=warps1, num_stages=stages1)
