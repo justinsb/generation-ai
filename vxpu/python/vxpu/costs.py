@@ -90,28 +90,60 @@ def shapes(values):
     return out
 
 
+NOISE_FRACTION = 0.03  # a fused body must beat the kernel by this share of the kernel's time ...
+NOISE_US = 2.0  # ... or by this many microseconds, whichever is larger: the measurement's noise band
+
+
+def decide(times, credit, kernel, noise_fraction=NOISE_FRACTION, noise_us=NOISE_US):
+    """Which candidate to run from the measured times {name: us} and the launch credit {name:
+    us} of the fused ones: `kernel` (the candidate that is not fused) unless a fused body
+    beats it by more than the measurement's noise, max(noise_fraction × the kernel's time,
+    noise_us). Two runs of the same site measured the fused attn_out body at 58.49 and 58.68
+    µs against the kernel's 57.60 and 57.64 (hero 11): with no band the choice flipped on noise
+    from run to run, 83 more kernels a step and other rounding at 40 sites, and the tokens
+    moved at position 26. Returns (name, why)."""
+    base = times[kernel]
+    margin = max(noise_fraction * base, noise_us)
+    best, best_us = kernel, base
+    for n, us in times.items():
+        if n == kernel:
+            continue
+        effective = us - credit.get(n, 0.0)
+        if effective < base - margin and effective < best_us:
+            best, best_us = n, effective
+    if best == kernel:
+        others = ", ".join(f"{n} {us:.1f} us (less {credit.get(n, 0.0):.1f} launch)" for n, us in times.items() if n != kernel)
+        why = f"{kernel} {base:.1f} us; {others} not under it by the {margin:.1f} us noise band"
+    else:
+        why = f"{best} {times[best]:.1f} us less {credit.get(best, 0.0):.1f} launch beats {kernel} {base:.1f} us by more than the {margin:.1f} us noise band"
+    return best, why
+
+
 def choose(op, candidates, values, device):
     """The name of the cheapest of candidates {name: (fn, fused)} for a call with these
-    values (fake tensors stand for activations, real ones are the graph's weights), and
-    the measured times. fn(*values) computes the call; fused ones are compiled first.
-    Exactly one candidate is not fused: the choice when nothing can be measured."""
+    values (fake tensors stand for activations, real ones are the graph's weights), the
+    measured times, and why. fn(*values) computes the call; fused ones are compiled first.
+    Exactly one candidate is not fused: the choice when nothing can be measured, and the
+    choice unless a fused body wins by more than the noise band (decide)."""
     name = torch.cuda.get_device_name(device)
     key = "|".join([name, op, ",".join(sorted(candidates))] + shapes(values))
     with _lock:
         known = _load().get(key)
+    credit = {n: (_launch(device) if fused else 0.0) for n, (_, fused) in candidates.items()}
+    kernel = next(n for n, (_, fused) in candidates.items() if not fused)
     if known is not None and set(known["times_us"]) == set(candidates):
-        return known["chosen"], known["times_us"]
+        chosen, why = decide(known["times_us"], credit, kernel)  # decided again: an older cache entry may predate the band
+        return chosen, known["times_us"], why
     try:
         times = {n: _measure(fn, values, device, compile_=fused) for n, (fn, fused) in candidates.items()}
     except torch.OutOfMemoryError:  # no room for the copies (a GPU full of weights): no fusion, not recorded
         torch.cuda.empty_cache()
-        return next(n for n, (_, fused) in candidates.items() if not fused), {}
-    credit = {n: (_launch(device) if fused else 0.0) for n, (_, fused) in candidates.items()}
-    chosen = min(times, key=lambda n: times[n] - credit[n])
+        return kernel, {}, "no room to measure: the kernel"
+    chosen, why = decide(times, credit, kernel)
     with _lock:
         _load()[key] = {"times_us": times, "chosen": chosen}
         _save()
-    return chosen, times
+    return chosen, times, why
 
 
 def _materialize(v, device):

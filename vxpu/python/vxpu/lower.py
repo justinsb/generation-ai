@@ -383,7 +383,7 @@ def lower(gm, plan, layer_device=None):
         available = plan.candidates(op, device_type)
         candidates = [i.name for i in available]
         fused = [i.name for i in available if i.fused]  # bodies the compiler fuses: credited a launch (costs.py)
-        times = None
+        times = why = None
         impl = plan.table_choice(op, device_type, key, site=site, lowering=True, **ctx)
         if impl is not None:
             source = "table"
@@ -391,12 +391,12 @@ def lower(gm, plan, layer_device=None):
             impl = ops.select(op, *args, plan=plan, lowering=True, site=site)
             source = "registry"
             if impl.fused:
-                impl, times = _cheaper(op, impl, ops.select(op, *args, plan=plan, site=site), args, report)
+                impl, times, why = _cheaper(op, impl, ops.select(op, *args, plan=plan, site=site), args, report)
                 if times:
                     source = "measured"
         target = devices.get(node)
         entry = dict(op=op, site=site, node=node.name, shapes=key, layer=layer, chosen=impl.name, source=source,
-                     candidates=candidates, fused=fused, measured_us=times or None,
+                     candidates=candidates, fused=fused, measured_us=times or None, why=why,
                      device=str(target) if target is not None else None)
         if not impl.lowerable:
             report[op]["kept"][impl.name] += 1
@@ -425,16 +425,16 @@ def _cheaper(op, fused, other, args, report):
     competes: one that is not runs through its op, as the plan chose it (a bf16 weight copy
     kept in the engine's cache, say), which a measurement on its own could not reproduce."""
     if other.name == fused.name:
-        return other, None
+        return other, None, None
     if not other.lowerable:
         # the reference computation (plain tensor operations) is better inlined as the body
         # than kept as a call the compiler cannot take; any other unlowerable choice stays
-        return (fused if other.reference else other), None
-    chosen, times = costs.choose(op, {fused.name: (_implementation(op, fused), True),
-                                      other.name: (_implementation(op, other), False)}, args, _device(args))
+        return (fused if other.reference else other), None, None
+    chosen, times, why = costs.choose(op, {fused.name: (_implementation(op, fused), True),
+                                           other.name: (_implementation(op, other), False)}, args, _device(args))
     if times:
         report[op]["measured"][" ".join(costs.shapes(args))] = times
-    return (fused if chosen == fused.name else other), times
+    return (fused if chosen == fused.name else other), times, why
 
 
 def _linear_reduction(x, w, b=None):
@@ -529,8 +529,8 @@ def _fuse_matmuls(gm, report, devices=None):
             def body(equation, operands):
                 return _einsum_reduction(equation, *operands)
         aten = node.target
-        chosen, times = costs.choose(op, {"reduction": (body, True), "aten": (lambda *a: aten(*a), False)},
-                                     values, _device(values))
+        chosen, times, _ = costs.choose(op, {"reduction": (body, True), "aten": (lambda *a: aten(*a), False)},
+                                        values, _device(values))
         if times:
             report[op]["measured"][" ".join(costs.shapes(values))] = times
         if chosen == "aten":
