@@ -1,0 +1,102 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The speculation policies on synthetic inputs: acceptance, the confidence stop, the expert
+preference and budget, the stats the record carries, and the plan section's checks."""
+import unittest
+
+from vxpu import speculation as sp
+
+
+class AcceptanceTest(unittest.TestCase):
+    def test_keeps_drafts_until_the_first_that_differs(self):
+        # the verify chose 7, 8, 9, 10 at the four positions; the drafts were 7, 8, 5, 10
+        self.assertEqual(sp.accept([7, 8, 5, 10], [7, 8, 9, 10]), 2)
+        self.assertEqual(sp.accept([7, 8, 9, 10], [7, 8, 9, 10]), 4)
+        self.assertEqual(sp.accept([1, 8, 9, 10], [7, 8, 9, 10]), 0)
+        self.assertEqual(sp.accept([], []), 0)
+
+
+class DraftLengthTest(unittest.TestCase):
+    def test_fixed_issues_every_draft(self):
+        self.assertEqual(sp.draft_length([0.9, 0.1, 0.1, 0.1], sp.Policy(draft=4)), 4)
+        self.assertEqual(sp.draft_length([0.9, 0.1], sp.Policy(draft=4)), 2)
+
+    def test_confidence_stops_at_the_first_unsure_draft(self):
+        p = sp.Policy(draft=4, policy=sp.CONFIDENCE, min_confidence=0.5)
+        self.assertEqual(sp.draft_length([0.9, 0.6, 0.4, 0.8], p), 2)
+        self.assertEqual(sp.draft_length([0.2, 0.9, 0.9, 0.9], p), 0)
+        self.assertEqual(sp.draft_length([0.9, 0.9, 0.9, 0.9], p), 4)
+
+
+class ExpertsPolicyTest(unittest.TestCase):
+    reading = [[1, 2, 3], [4, 5, 6]]  # two layers, the experts the batch reads for its first tokens
+
+    def test_prefers_the_candidate_already_read(self):
+        a = [[1, 2, 9], [4, 7, 8]]  # adds 1 + 2 experts
+        b = [[1, 2, 3], [4, 5, 9]]  # adds 0 + 1
+        self.assertEqual(sp.prefer([a, b], self.reading), 1)
+        self.assertEqual(sp.prefer([b, a], self.reading), 0)
+        self.assertEqual(sp.new_experts(a, self.reading), 3)
+        # a tie goes to the drafter's first (most probable) candidate
+        self.assertEqual(sp.prefer([a, a], self.reading), 0)
+
+    def test_budget_cuts_the_drafts(self):
+        p = sp.Policy(draft=3, policy=sp.EXPERTS, max_new_experts=1, candidates=2)  # one new expert a layer: 2 in all
+        cheap = [[1, 2, 3], [4, 5, 9]]  # 1 new
+        dear = [[7, 8, 9], [10, 11, 12]]  # 6 new
+        positions = [[dear, cheap], [dear, cheap], [dear, cheap]]
+        # cheap at each position; the second cheap draft repeats expert 9 so it adds nothing; the third too
+        self.assertEqual(sp.plan_drafts(positions, self.reading, p), [1, 1, 1])
+        positions = [[dear, cheap], [dear], [cheap]]
+        self.assertEqual(sp.plan_drafts(positions, self.reading, p), [1])  # the dear-only position breaks the budget
+        fixed = sp.Policy(draft=3, policy=sp.FIXED)
+        self.assertEqual(sp.plan_drafts(positions, self.reading, fixed), [0, 0, 0])  # fixed takes the first candidate throughout
+
+
+class StatsTest(unittest.TestCase):
+    def test_per_position_rates_and_confidence(self):
+        s = sp.Stats(positions=4)
+        s.record(issued=4, accepted=2, draft_probs=[0.9, 0.8, 0.3, 0.2])
+        s.record(issued=4, accepted=0, draft_probs=[0.4, 0.8, 0.3, 0.2])
+        s.record(issued=2, accepted=2, draft_probs=[0.7, 0.6])
+        out = s.summary()
+        self.assertEqual((out["steps"], out["issued"], out["accepted"]), (3, 10, 4))
+        self.assertEqual(out["alpha"], 0.4)
+        first = out["positions"][0]
+        self.assertEqual((first["issued"], first["accepted"], first["rate"]), (3, 2, 0.667))
+        self.assertEqual(first["confidence_accepted"], 0.8)
+        self.assertEqual(first["confidence_rejected"], 0.4)
+        third = out["positions"][2]
+        self.assertEqual((third["issued"], third["accepted"]), (2, 0))
+        self.assertIsNone(third["confidence_accepted"])
+
+
+class PlanSectionTest(unittest.TestCase):
+    def test_reads_and_checks_the_plan_section(self):
+        self.assertEqual(sp.Policy.from_plan(None), sp.Policy())
+        p = sp.Policy.from_plan({"draft": 4, "policy": "confidence", "min_confidence": 0.5})
+        self.assertEqual((p.draft, p.policy, p.min_confidence), (4, "confidence", 0.5))
+        with self.assertRaises(ValueError):
+            sp.Policy.from_plan({"draft": 4, "policy": "lucky"})
+        with self.assertRaises(ValueError):
+            sp.Policy.from_plan({"draft": 4, "policy": "confidence"})
+        with self.assertRaises(ValueError):
+            sp.Policy.from_plan({"draft": 9, "policy": "fixed"})
+        with self.assertRaises(ValueError):
+            sp.Policy.from_plan({"draft": 2, "policy": "experts", "candidates": 0})
+
+
+if __name__ == "__main__":
+    unittest.main()

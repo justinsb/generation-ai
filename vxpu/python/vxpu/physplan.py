@@ -17,13 +17,16 @@ GPU, the pipeline of batches over them and the kernel table to apply. `VXPU_PLAN
 the engine one; the engine reads it before its Plan reads the environment and renders it as
 the switches the Plan knows (VXPU_LAYER_DEVICES, VXPU_PLAN_TABLE), so the plan file and the
 switches are one mechanism with the file in front. The batch count is for the caller
-(default_batches: Engine.generate_rows(batches=...)). An expert placement other than the
+(default_batches: Engine.generate_rows(batches=...)); the speculation section (the draft length
+and accept policy, hero run 10) is for the drafter path (speculation_policy). An expert placement other than the
 placement file given in VXPU_GPU_EXPERTS is not rendered yet: the engine needs the experts per
 layer to build one, and "with-layers" (every expert of a range's layers on the range's GPU) is
 what the hand file placement-ranges4c.json holds for DeepSeek-V4.1-Flash."""
 
 import json
 import os
+
+from vxpu import speculation
 
 FORMAT = "vxpu-plan/1"
 _loaded = None
@@ -46,6 +49,10 @@ def load(path):
     batches = (plan.get("pipeline") or {}).get("batches", 1)
     if not isinstance(batches, int) or batches < 1:
         raise ValueError(f"VXPU_PLAN={path!r}: pipeline.batches must be a positive integer")
+    try:
+        speculation.Policy.from_plan(plan.get("speculation"))
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"VXPU_PLAN={path!r}: {e}") from None
     return plan
 
 
@@ -86,6 +93,14 @@ def apply_env():
               + (f"; {'; '.join(notes)}" if notes else ""), flush=True)
         _loaded = plan
     return _loaded
+
+
+def speculation_policy():
+    """The plan's speculation section as a speculation.Policy (no drafts without a plan or a
+    section). The engine's drafter path applies it through speculation.draft_length,
+    plan_drafts and accept; the export's step tokens bound the draft."""
+    plan = apply_env()
+    return speculation.Policy.from_plan(plan.get("speculation") if plan else None)
 
 
 def default_batches():

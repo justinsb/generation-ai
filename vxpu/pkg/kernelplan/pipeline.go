@@ -55,8 +55,68 @@ type PipelinePlan struct {
 	// Kernels is the kernel table (vxpu-kernel-table/1) to apply: a path, or
 	// the table inline; empty lets the engine measure.
 	Kernels json.RawMessage `json:"kernels,omitempty"`
+	// Speculation is how a step drafts and verifies tokens (hero run 10);
+	// nil: one token a step, no drafter.
+	Speculation *Speculation `json:"speculation,omitempty"`
 	// Explain says why, line by line; the engine does not read it.
 	Explain []string `json:"explain,omitempty"`
+}
+
+// Accept policies the engine knows (vxpu/python/vxpu/speculation.py applies them).
+const (
+	// PolicyFixed: every step drafts Draft tokens and keeps the drafts that
+	// equal the verified choice up to the first that does not.
+	PolicyFixed = "fixed"
+	// PolicyConfidence: the drafter stops at the first draft whose top
+	// probability is under MinConfidence, so a step verifies fewer token rows
+	// where the drafter is unsure; acceptance is the fixed policy's.
+	PolicyConfidence = "confidence"
+	// PolicyExperts: among the drafter's candidate continuations the one whose
+	// experts the step already reads is preferred, and the drafts are cut
+	// where they would add more than MaxNewExperts experts a layer beyond
+	// what the batch reads; acceptance is the fixed policy's.
+	PolicyExperts = "experts"
+)
+
+// Speculation is the plan's draft length and accept policy.
+type Speculation struct {
+	// Draft is the tokens drafted a step (the verify runs Draft+1 token rows
+	// a row); 0 turns the drafter off.
+	Draft  int    `json:"draft"`
+	Policy string `json:"policy"`
+	// MinConfidence is the confidence policy's threshold on the draft's top
+	// probability, in (0, 1).
+	MinConfidence float64 `json:"min_confidence,omitempty"`
+	// MaxNewExperts is the experts policy's budget of experts a layer a row's
+	// drafts may add beyond what the batch reads for its first tokens.
+	MaxNewExperts int `json:"max_new_experts,omitempty"`
+	// Candidates is how many continuations the drafter proposes per position
+	// for the experts policy to choose among (1: no choice).
+	Candidates int `json:"candidates,omitempty"`
+}
+
+// Validate checks a speculation section the engine would refuse.
+func (s *Speculation) Validate() error {
+	if s.Draft < 0 || s.Draft > 8 {
+		return fmt.Errorf("speculation draft %d: want 0 to 8", s.Draft)
+	}
+	switch s.Policy {
+	case PolicyFixed:
+	case PolicyConfidence:
+		if !(s.MinConfidence > 0 && s.MinConfidence < 1) {
+			return fmt.Errorf("speculation policy %q: min_confidence %.3f, want a probability in (0, 1)", s.Policy, s.MinConfidence)
+		}
+	case PolicyExperts:
+		if s.MaxNewExperts < 0 {
+			return fmt.Errorf("speculation policy %q: max_new_experts %d, want 0 or more", s.Policy, s.MaxNewExperts)
+		}
+		if s.Candidates < 1 {
+			return fmt.Errorf("speculation policy %q: candidates %d, want 1 or more", s.Policy, s.Candidates)
+		}
+	default:
+		return fmt.Errorf("speculation policy %q: the engine knows %q, %q and %q", s.Policy, PolicyFixed, PolicyConfidence, PolicyExperts)
+	}
+	return nil
 }
 
 // Range is a contiguous span of layers on one GPU: Layers is "first:last+1".
@@ -131,6 +191,11 @@ func (p *PipelinePlan) Validate() error {
 	}
 	if p.Experts != "" && p.Experts != "with-layers" && !strings.HasSuffix(p.Experts, ".json") {
 		return fmt.Errorf("experts %q: want \"with-layers\" or a placement file", p.Experts)
+	}
+	if p.Speculation != nil {
+		if err := p.Speculation.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
