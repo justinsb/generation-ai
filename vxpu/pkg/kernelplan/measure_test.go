@@ -106,7 +106,7 @@ func (f *fakeRunner) Run(ctx context.Context, jobs []Job) ([]Result, error) {
 
 func TestMeasureChoosesTheFastestAndKeepsFailuresOut(t *testing.T) {
 	classes := map[string]ClassRun{
-		"gemv_rows rows=1 n=5120 k=8192 w=fp8 native=1": {Count: 120, Blocks: map[string]int{"BM": 16, "BN": 16, "BK": 256, "KSPLIT": 1, "warps": 4, "stages": 3}},
+		"gemv_rows rows=1 n=5120 k=8192 w=fp8 native=1":         {Count: 120, Blocks: map[string]int{"BM": 16, "BN": 16, "BK": 256, "KSPLIT": 1, "warps": 4, "stages": 3}},
 		"gemv_rows rows=1 n=1280 k=5120 w=fp8 native=1 split=1": {Count: 40, Blocks: map[string]int{"BM": 16, "BN": 16, "BK": 256, "KSPLIT": 2, "warps": 4, "stages": 3}},
 	}
 	runner := &fakeRunner{
@@ -122,7 +122,7 @@ func TestMeasureChoosesTheFastestAndKeepsFailuresOut(t *testing.T) {
 		},
 		fail: func(j Job) bool { return j.Blocks["BN"] == 64 && j.Blocks["BK"] == 512 },
 	}
-	entries, explain, err := Measure(context.Background(), classes, runner, MeasureOptions{SMs: 188})
+	entries, explain, err := Measure(t.Context(), classes, runner, MeasureOptions{SMs: 188})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,5 +192,25 @@ func TestTableBlocksRoundTripAndCheck(t *testing.T) {
 	results, err := ParseResults([]byte("[measure] noise\n{\"shapes\":\"a\",\"blocks\":{\"BN\":16},\"us\":1.5}\n"))
 	if err != nil || len(results) != 1 || results[0].Us != 1.5 {
 		t.Errorf("parse: %v %v", results, err)
+	}
+}
+
+func TestTheCardsTableReadsAndItsBlocksAreMeasured(t *testing.T) {
+	// the table hero 11 measured on an RTX PRO 6000 (vxpu kernels measure over the one-row and
+	// nine-row records, on the ledger's site table): every block class carries its measurement
+	table, err := ReadTableFile("testdata/table-rtx6000.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(table.Blocks) < 20 || len(table.Sites) == 0 {
+		t.Fatalf("%d block classes, %d sites", len(table.Blocks), len(table.Sites))
+	}
+	for _, b := range table.Blocks {
+		if b.Us <= 0 || b.Bytes <= 0 || b.Efficiency <= 0.2 || b.Efficiency > 1.1 {
+			t.Errorf("%s: us %.1f bytes %d efficiency %.2f", b.Shapes, b.Us, b.Bytes, b.Efficiency)
+		}
+		if _, err := ParseClass(b.Shapes); err != nil {
+			t.Error(err)
+		}
 	}
 }

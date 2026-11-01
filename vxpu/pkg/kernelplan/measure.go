@@ -124,8 +124,13 @@ func ParseClass(key string) (Class, error) {
 	return c, nil
 }
 
+// field is a numeric flag of the class, 0 when absent or not a number (the flags
+// the keys carry are written by gemv_class, so a bad one is a bad key, not an error here).
 func (c Class) field(name string) int {
-	n, _ := strconv.Atoi(c.Fields[name])
+	n, err := strconv.Atoi(c.Fields[name])
+	if err != nil {
+		return 0
+	}
 	return n
 }
 
@@ -268,7 +273,11 @@ func (p PythonRunner) Run(ctx context.Context, jobs []Job) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil && p.Log != nil {
+			p.Log("leaving %s: %v", dir, err)
+		}
+	}()
 	data, err := json.Marshal(jobs)
 	if err != nil {
 		return nil, err

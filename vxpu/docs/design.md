@@ -1098,6 +1098,72 @@ workstreams in parallel from the start on the four pods, each change
 with its own measurement, hard interim deadlines, results read from the
 pods' files rather than from watchers.
 
+**Hero run 11, the GEMV templates against their floors (Nov 1, measured
+on pod A).** The record now names every GEMV call's shape class (the
+template, the rows, the weight's shape and dtype, the prologue and
+epilogue flags: `triton_ops.gemv_class`), with the blocks that ran and
+the call sites a step launches (`stats.gemv_classes`); `python -m
+vxpu.measure classes` gives each class its bytes and its floor, and
+`vxpu kernels measure` sweeps the blocks a class can run (weight rows a
+program, the K step, the K split where the caller takes partial sums,
+warps, then the pipeline depth on the winner) through a micro-benchmark
+that replays the kernel over weights cycled past the L2 inside a CUDA
+graph, and writes the fastest per class into the table's `blocks`
+entries, which the dispatchers apply (`gemv_blocks`) and `vxpu kernels
+check` verifies. The verdict first: the dense GEMV templates were
+already at 87% of the byte floor as a whole, the sweep found the
+engine's hand-set tiles best or within 2% in every class but three, and
+the step moved by 0.2 ms at one row and 1.4 ms at nine, with tokens
+identical to the control. The one-row ledger, per layer (the 42 MB
+classes read 1,460 GB/s as the floor):
+
+| class (one row) | bytes a launch | floor µs | measured µs, engine's tiles | efficiency | the sweep's best | gain |
+|---|---|---|---|---|---|---|
+| attn_q's up-projection wq_b, rotary epilogue (gemv_pe) | 42.1 MB | 28.8 | 29.9 | 96% | the same | 0 |
+| attn_out's wo_b, hc epilogue | 42.1 MB | 28.9 | 31.1 | 93% | the same, 4 stages | 0 |
+| attn_out's wo_a, grouped, quantizing epilogue | 33.6 MB | 23.1 | 24.7 | 94% | 4 stages: 24.5 | 1% |
+| the shared expert's dual SwiGLU GEMV | 23.6 MB | 16.2 | 21.2 | 76% | 2 warps, K split 8, 4 stages: 17.4 | 18% |
+| the shared expert's w2 | 11.8 MB | 8.1 | 10.6 | 76% | 2 warps: 10.4 | 2% |
+| attn_q's down-projection wq_a (1,280 rows, K split 4) | 6.6 MB | 4.5 | 7.5 | 60% | 2 warps: 7.3 | 3% |
+| the engram layers' 4,096-row linear | 5.3 MB | 3.6 | 8.1 | 44% | 2 warps: 6.1 | 25% |
+| the KV window's wkv (512 rows, K split 4) | 2.6 MB | 1.8 | 3.4 | 53% | 2 warps: 3.2 | 6% |
+| the head (bf16, fp32 out) | 1,324 MB | 907 | 863 | 105% (reads run above the copy bandwidth) | the same | 0 |
+| the engram layers' 25,600-row linear | 157.5 MB | 107.8 | 105.9 | 102% | the same | 0 |
+
+What the ledger says, in plain words: the big weights stream at 93 to
+105% of the card's bandwidth already; the loss is in the small ones (3
+to 11 µs a launch, under 12 MB), which cannot cover the card: 512 or
+1,280 rows give 32 or 80 programs of 16 rows for 188 SMs, and the K
+split (already 4) buys nothing past that (8 and 16 measured slower)
+because each split's program then does a handful of K steps and the
+launch's ramp dominates. Two warps instead of four helped exactly
+those, the dual GEMV most (72 programs before its split). Where the
+structure binds, the fix is not a tile: the two narrow GEMVs at the
+attention's front read the same activations and would be one launch,
+and the dual GEMV's split epilogue could join its w2 consumer; those are
+fusions across ops, the tail workstream's and the next run's. The
+sweep itself: 10 decode classes a row count, 34 to 254 candidates a
+class, about two minutes a sweep on one GPU; the table for this card
+is checked in (`pkg/kernelplan/testdata/table-rtx6000.json`, 26 block
+classes over the ledger's 93 site entries). Measured steps, both arms on
+the ledger's site table (triton at attn_out), the sweep's blocks the
+only difference: one row 13.2 → 13.0 ms (1,383 kernels both; the
+profile's GPU time 12.77 ms); nine rows of one prompt 22.3 → 20.9, of
+the same prompt 17.0 → 16.7, of different prompts 34.2 → 33.9; tokens
+identical at one row and in all nine rows. The nine-row profiles say
+how much of that is the blocks: the step's GPU time went 20.65 → 20.46
+ms (the dual GEMV 0.94 → 0.77, gemv_rows 4.70 → 4.66, nothing else
+moved), so the blocks bought 0.2 ms a step at nine rows as at one; the
+rest of the 1.4 ms between the one-prompt arms is the step's gaps
+outside the kernels, which that case has shown at ±1 ms between runs
+all day (21.1, 22.0, 22.3, 20.9 across four loads) and which no table
+sets. Found on the way and fixed:
+the lowering's per-run measurement flipped attn_out between its fused
+body and the kernel on 1% of noise (58.5 against 57.6 µs), moving the
+tokens at position 26 between two loads of the same tree; a fused body
+now has to beat the kernel by max(3%, 2 µs) (`costs.decide`), and the
+record says by how much.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
