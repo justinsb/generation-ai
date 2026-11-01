@@ -830,6 +830,51 @@ composing; the consistency checks costing a few percent at most. Risk:
 the batched drafter is new code on the hardest path; the checks go in
 first. Setup: four identical disk-layout pods, two per node.
 
+**Hero 10, the planner's side (Nov 1).** The planner picks the serving
+shape from a load (rows in all, the prompt mix, a latency bound per
+token, whether the artifact has the drafter): `vxpu plan serve` scores
+every shape the engine has (one wide batch or one batch per range, no
+drafter or 1 to 5 drafts under each accept policy) with the cost model
+and writes the chosen plan, whose new `speculation` section names the
+draft length and the policy (`fixed`, `confidence` with its threshold,
+`experts` with its budget of new experts a layer and the candidates to
+choose among); the engine reads the section through `physplan` and
+applies it with the pure functions in `vxpu/speculation.py`
+(`draft_length`, `plan_drafts`, `accept`), whose `Stats` carry the
+per-position acceptance and confidence into the record. The speculative
+step's model (`pkg/planner/speculation.go`): a step with k drafts a row
+verifies k+1 token rows, reads the dense weights once and the experts
+once per distinct expert the token rows select, pays 0.35 ms a token row
+and 3.5 ms for the drafter's graphs on the last range, and yields
+1 + α + ... + α^k tokens at a per-position acceptance α of 0.68 (fitted
+to the measured 2.67 tokens a step at four drafts). The distinct experts
+a layer: across rows the measured curve (6 at one row or one prompt,
+37.3 at 9 different prompts, 90.3 at 33, log-linear between and extended
+past 33 as an estimate); along a row's verify a token curve measured on
+Nov 1 (pod hero-d, the specm5 artifacts, VXPU_EXPERT_STATS=1): the five
+token rows of one row read 18.3 distinct experts a layer, not the 30 of
+independent draws, and eight different prompts at five tokens read 83.2,
+not 8 × 18.3; so consecutive tokens share more experts than rows of
+different prompts do, and the growth saturates where the rows already
+read most of the layer. So calibrated, the model is within 8% of the
+five measured speculative steps (one row at 2, 4 and 5 drafts; eight
+rows at 4 drafts, one prompt in 40.4 ms and a prompt per row in 95.1).
+What it predicts, and the run measures (`dev/hero/predictions.json`, 88
+cases; "fixed" is the engine's policy today, the adaptive ones rest on
+estimated parameters until the engine records the confidence histogram):
+at one row four drafts yield 104 tok/s (measured 103) and the confidence
+policy at five drafts 108; four batches of one row with four drafts 271
+against 259 plain; eight rows of one prompt 506 with four drafts
+(measured 531) against 446 plain; four batches of eight rows of
+different prompts 835 with two drafts against 782 plain; at 33 rows a
+batch the token rows' own cost nearly cancels the tokens they yield, and
+the model calls two drafts and none within about 10% of each other
+(four batches of 33: 3,394 plain against 3,402 at two drafts with one
+prompt in every row; 1,329 against 1,589 with a prompt per row), which
+is inside its error: that crossover is the run's to measure, not the
+model's to call. One wide batch of 132 different prompts 580 against
+1,329 for four of 33, because one batch streams one GPU at a time.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers

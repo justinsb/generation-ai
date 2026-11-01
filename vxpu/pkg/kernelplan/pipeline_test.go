@@ -40,16 +40,30 @@ func TestPipelinePlan_RoundTripAndSwitch(t *testing.T) {
 	if got, want := q.LayerDevices(), "0:8=cuda:0,8:20=cuda:1,20:32=cuda:2,32:43=cuda:3"; got != want {
 		t.Fatalf("layer devices %q, want %q", got, want)
 	}
+	p.Speculation = &Speculation{Draft: 4, Policy: PolicyConfidence, MinConfidence: 0.4}
+	if data, err = p.Write(); err != nil {
+		t.Fatal(err)
+	}
+	if q, err = ReadPlan(data); err != nil {
+		t.Fatal(err)
+	}
+	if q.Speculation == nil || q.Speculation.Draft != 4 || q.Speculation.Policy != PolicyConfidence || q.Speculation.MinConfidence != 0.4 {
+		t.Fatalf("round trip lost the speculation section: %+v", q.Speculation)
+	}
 }
 
 func TestPipelinePlan_Refusals(t *testing.T) {
 	cases := map[string]string{
-		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"},{"gpu":1,"layers":"9:20"}],"pipeline":{"batches":1,"schedule":"range-order"}}`: "contiguous",
-		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"},{"gpu":0,"layers":"8:20"}],"pipeline":{"batches":1,"schedule":"range-order"}}`: "already holds",
-		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":0,"schedule":"range-order"}}`:                           "at least 1",
-		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":2,"schedule":"lifo"}}`:                                  "schedule",
-		`{"format":"vxpu-plan/2","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":2,"schedule":"range-order"}}`:                           "format",
-		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":2,"schedule":"range-order"},"surprise":1}`:              "unknown field",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"},{"gpu":1,"layers":"9:20"}],"pipeline":{"batches":1,"schedule":"range-order"}}`:                                   "contiguous",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"},{"gpu":0,"layers":"8:20"}],"pipeline":{"batches":1,"schedule":"range-order"}}`:                                   "already holds",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":0,"schedule":"range-order"}}`:                                                             "at least 1",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":2,"schedule":"lifo"}}`:                                                                    "schedule",
+		`{"format":"vxpu-plan/2","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":2,"schedule":"range-order"}}`:                                                             "format",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":2,"schedule":"range-order"},"surprise":1}`:                                                "unknown field",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":1,"schedule":"range-order"},"speculation":{"draft":4,"policy":"lucky"}}`:                  "policy",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":1,"schedule":"range-order"},"speculation":{"draft":4,"policy":"confidence"}}`:             "min_confidence",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":1,"schedule":"range-order"},"speculation":{"draft":9,"policy":"fixed"}}`:                  "0 to 8",
+		`{"format":"vxpu-plan/1","ranges":[{"gpu":0,"layers":"0:8"}],"pipeline":{"batches":1,"schedule":"range-order"},"speculation":{"draft":4,"policy":"experts","candidates":0}}`: "candidates",
 	}
 	for plan, want := range cases {
 		_, err := ReadPlan([]byte(plan))
