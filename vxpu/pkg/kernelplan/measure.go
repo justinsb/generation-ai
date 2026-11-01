@@ -243,6 +243,7 @@ type PythonRunner struct {
 	Python string   // the interpreter (default "python")
 	Env    []string // extra environment (PYTHONPATH, CUDA_VISIBLE_DEVICES)
 	Device string   // the CUDA device (default cuda:0)
+	Keep   string   // where to keep the runner's result lines (default: a temporary file)
 	Log    func(format string, args ...any)
 }
 
@@ -268,13 +269,22 @@ func (p PythonRunner) Run(ctx context.Context, jobs []Job) ([]Result, error) {
 	if device == "" {
 		device = "cuda:0"
 	}
-	cmd := exec.CommandContext(ctx, python, "-m", "vxpu.measure", "run", jobsPath, "--device", device)
+	// the runner appends a line per job to a file, so a run that dies keeps what it measured
+	outPath := dir + "/results.jsonl"
+	if p.Keep != "" {
+		outPath = p.Keep
+	}
+	cmd := exec.CommandContext(ctx, python, "-m", "vxpu.measure", "run", jobsPath, "--device", device, "--out", outPath)
 	cmd.Env = append(os.Environ(), p.Env...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
-	results, parseErr := ParseResults(stdout.Bytes())
+	lines, readErr := os.ReadFile(outPath)
+	if readErr != nil && runErr != nil {
+		return nil, fmt.Errorf("python -m vxpu.measure run: %w: %s", runErr, lastLines(stderr.String(), 5))
+	}
+	results, parseErr := ParseResults(lines)
 	if parseErr != nil {
 		return nil, parseErr
 	}
@@ -319,6 +329,17 @@ type MeasureOptions struct {
 	SMs       int      // the card's streaming multiprocessors (the K split's bound); 0: unknown, no bound
 	Templates []string // only these templates (empty: all)
 	MaxRows   int      // only classes of at most this many rows (0: all)
+	NoStages  bool     // skip the second pass over the pipeline depth
+}
+
+func fastest(rs []Result) *Result {
+	var best *Result
+	for i := range rs {
+		if rs[i].Error == "" && (best == nil || rs[i].Us < best.Us) {
+			best = &rs[i]
+		}
+	}
+	return best
 }
 
 // Measure sweeps the classes' blocks through the runner and returns the
@@ -359,6 +380,31 @@ func Measure(ctx context.Context, classes map[string]ClassRun, runner Runner, op
 	byClass := map[string][]Result{}
 	for _, r := range results {
 		byClass[r.Shapes] = append(byClass[r.Shapes], r)
+	}
+	// the second pass: the pipeline depth (stages 2 and 4) on each class's winner
+	if !opts.NoStages {
+		var more []Job
+		for _, key := range keys {
+			if best := fastest(byClass[key]); best != nil {
+				for _, st := range []int{2, 4} {
+					b := map[string]int{}
+					for k, v := range best.Blocks {
+						b[k] = v
+					}
+					b["stages"] = st
+					more = append(more, Job{Shapes: key, Blocks: b})
+				}
+			}
+		}
+		if len(more) > 0 {
+			second, err := runner.Run(ctx, more)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, r := range second {
+				byClass[r.Shapes] = append(byClass[r.Shapes], r)
+			}
+		}
 	}
 	var entries []BlockEntry
 	var explain []string

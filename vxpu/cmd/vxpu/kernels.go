@@ -146,6 +146,7 @@ func runKernelsMeasure(ctx context.Context, args []string) error {
 	var templates stringList
 	flags.Var(&templates, "template", "only this template (repeatable: gemv_rows, dual_gemv_swiglu, gemv_pe)")
 	maxRows := flags.Int("max-rows", 0, "only classes of at most this many rows (0: all)")
+	keepPath := flags.String("keep", "", "keep the runner's result lines here (default: a temporary file)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -166,13 +167,24 @@ func runKernelsMeasure(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	runner := kernelplan.PythonRunner{Python: *python, Device: *device, Log: func(format string, a ...any) { log.Info(fmt.Sprintf(format, a...)) }}
+	runner := kernelplan.PythonRunner{Python: *python, Device: *device, Keep: *keepPath, Log: func(format string, a ...any) { log.Info(fmt.Sprintf(format, a...)) }}
 	log.Info("measuring the GEMV shape classes", "classes", len(classes), "gpu", record.Hardware.GPU, "device", *device)
 	entries, explain, err := kernelplan.Measure(ctx, classes, runner, kernelplan.MeasureOptions{SMs: *sms, Templates: templates, MaxRows: *maxRows})
 	if err != nil {
 		return err
 	}
-	table.Blocks = entries
+	// a table being extended keeps its blocks for the classes this record did not run
+	merged := map[string]kernelplan.BlockEntry{}
+	for _, e := range table.Blocks {
+		merged[e.Shapes] = e
+	}
+	for _, e := range entries {
+		merged[e.Shapes] = e
+	}
+	table.Blocks = table.Blocks[:0]
+	for _, e := range merged {
+		table.Blocks = append(table.Blocks, e)
+	}
 	bytesAStep, usAStep := kernelplan.StepFloor(classes, entries)
 	explain = append(explain, fmt.Sprintf("the GEMV classes measured: %.2f GB a step at the record's counts, %.2f ms a step under the chosen blocks", float64(bytesAStep)/1e9, usAStep/1e3))
 	table.Explain = append(table.Explain, explain...)

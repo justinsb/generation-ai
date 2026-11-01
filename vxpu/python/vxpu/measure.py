@@ -263,6 +263,7 @@ def run_jobs(jobs, device, out, gbps=None):
         out.write(json.dumps(line) + "\n")
         out.flush()
         done += 1
+        print(f"[measure] {done}/{len(jobs)} {key} {blocks}: {line.get('us', line.get('error'))}", file=sys.stderr, flush=True)
     return done
 
 

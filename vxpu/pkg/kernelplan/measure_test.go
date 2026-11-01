@@ -89,7 +89,7 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) Run(ctx context.Context, jobs []Job) ([]Result, error) {
-	f.jobs = jobs
+	f.jobs = append(f.jobs, jobs...)
 	var out []Result
 	for _, j := range jobs {
 		r := Result{Shapes: j.Shapes, Blocks: j.Blocks, Bytes: 42_000_000, FloorUs: 28.8}
@@ -110,8 +110,8 @@ func TestMeasureChoosesTheFastestAndKeepsFailuresOut(t *testing.T) {
 		"gemv_rows rows=1 n=1280 k=5120 w=fp8 native=1 split=1": {Count: 40, Blocks: map[string]int{"BM": 16, "BN": 16, "BK": 256, "KSPLIT": 2, "warps": 4, "stages": 3}},
 	}
 	runner := &fakeRunner{
-		us: func(j Job) float64 { // BN 32 with 8 warps is fastest; a K split of 4 for the narrow one
-			us := 40.0 - float64(j.Blocks["BN"])/4 - float64(j.Blocks["warps"])
+		us: func(j Job) float64 { // BN 64 with 8 warps is fastest, 4 stages better still; a K split of 4 for the narrow one
+			us := 40.0 - float64(j.Blocks["BN"])/4 - float64(j.Blocks["warps"]) - float64(j.Blocks["stages"])/10
 			if strings.Contains(j.Shapes, "split=1") {
 				us = 12.0 - float64(j.Blocks["KSPLIT"])
 				if j.Blocks["KSPLIT"] == 8 {
@@ -134,8 +134,8 @@ func TestMeasureChoosesTheFastestAndKeepsFailuresOut(t *testing.T) {
 		byKey[e.Shapes] = e
 	}
 	wide := byKey["gemv_rows rows=1 n=5120 k=8192 w=fp8 native=1"]
-	if wide.Blocks["BN"] != 64 || wide.Blocks["warps"] != 8 || wide.Blocks["BK"] == 512 {
-		t.Errorf("the wide class should take the fastest candidate that ran: %+v", wide)
+	if wide.Blocks["BN"] != 64 || wide.Blocks["warps"] != 8 || wide.Blocks["BK"] == 512 || wide.Blocks["stages"] != 4 {
+		t.Errorf("the wide class should take the fastest candidate that ran, with the second pass's stages: %+v", wide)
 	}
 	narrow := byKey["gemv_rows rows=1 n=1280 k=5120 w=fp8 native=1 split=1"]
 	if narrow.Blocks["KSPLIT"] != 4 {
