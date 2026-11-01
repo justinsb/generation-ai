@@ -794,6 +794,42 @@ its 494 tok/s at 24 streams against our 1,414 at 132 rows in flight on
 four cards with different prompts; single-stream 103.8 against our 73,
 with the drafter 285 against our 100.
 
+**Hero run 10's acceptance, agreed Oct 31 (night).** The planner picks
+the serving shape. Hero 9 showed the engine runs several batches in
+flight and that the cost model predicts it; hero 10 asks the planner to
+choose, per load, among the shapes the engine now has, and proves the
+choice with measurements at every load in the table (1, 9 and 33 rows;
+one batch and four in flight):
+- speculation inside the pipeline: the drafter with batches in flight,
+  which hero 9 did not build; the planner predicts, per load, whether to
+  draft and with how many tokens (a five-token verify reads many more
+  distinct experts at 33 rows than at one), and the run measures the
+  crossover;
+- adaptive speculation: the draft length and the acceptance per step
+  driven by the drafter's confidence, and drafts preferred or dropped by
+  whether their experts are already being read in the step, each as a
+  policy the planner scores against the cost model and the run measures;
+- one wide batch against several in flight: 132 rows in one batch
+  against four batches of 33, since rows in a batch share every expert
+  read and batches do not; both predicted, both measured, bounded by the
+  rows' cache memory;
+- per-batch efficiency: a batch of 33 different prompts runs at 54% of
+  its bytes with its kernels near their bytes, so the launch count
+  (about 1,700 kernels a step at 33 rows: the remaining fork boundaries,
+  the activation recoding folded into its producers, the ring write as
+  an op) and the pacing by the two middle ranges are the items;
+- self-testing built in: golden values per model checked at load; the
+  reference implementation run beside the chosen one on a sample of
+  steps, on by default in development; and a standing invariant that
+  pads a batch with a copy of one row and asserts the two rows agree
+  every step, which would have caught this week's counter race, strided
+  copy, stale replica and branch fault on their first run.
+What to prove: the planner's choice within about 20% of the best
+measured configuration at every load; speculation and batching
+composing; the consistency checks costing a few percent at most. Risk:
+the batched drafter is new code on the hardest path; the checks go in
+first. Setup: four identical disk-layout pods, two per node.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
