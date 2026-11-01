@@ -185,6 +185,15 @@ def _check(status, what):
         raise RuntimeError(f"step graph: {what} failed (CUresult {status})")
 
 
+def _ring_ok(value, inbox):
+    """Whether the ring write (triton_ops.ring_write) can carry value into inbox: on (RING_WRITE),
+    both contiguous CUDA tensors of the same bytes, a multiple of 4."""
+    return (triton_ops is not None and triton_ops.RING_WRITE and triton_ops.triton is not None and value.is_cuda
+            and inbox.is_cuda and value.is_contiguous() and inbox.is_contiguous()
+            and value.numel() * value.element_size() == inbox.numel() * inbox.element_size()
+            and (value.numel() * value.element_size()) % 4 == 0)
+
+
 def _experts_call(sub):
     """For a host segment that calls the routed experts: (layer, the
     positions of x, weights and indices among the segment's inputs)."""
@@ -708,6 +717,8 @@ class StepGraph(torch.nn.Module):
                         xvalue_wave[(node.name, index, d2)] = key
                         last_producer[key] = node.name
         wflags = {key: torch.zeros(1, dtype=torch.int32, device=key[1]) for key in last_producer}
+        # the ring write's program counters, one per wave on the producer GPU, made before any capture
+        counters = {key: torch.zeros(1, dtype=torch.int32, device=key[0]) for key in last_producer}
         # the step's inputs: a GPU whose first flag comes (transitively) after the engine's GPU
         # copied them out needs no flag of its own for them
         first_wait = {}
@@ -786,6 +797,8 @@ class StepGraph(torch.nn.Module):
             idx = (pos[:, None] + torch.arange(toks, device=d)).clamp_(max=w["src"].shape[1] - 1)
             return idx.reshape((rows_n, toks) + (1,) * len(w["src"].shape[2:])).expand((rows_n, toks) + tuple(w["src"].shape[2:]))
 
+        pending = collections.defaultdict(list)  # wave key -> [(value, inbox, producer)] the ring write carries
+        self._ring_writes = 0
         for d in devs:
             g = torch.cuda.CUDAGraph(keep_graph=True)  # kept, to count its nodes (node_counts)
             with torch.cuda.device(d), torch.cuda.graph(g, stream=torch.cuda.Stream(device=d)):
@@ -873,14 +886,28 @@ class StepGraph(torch.nn.Module):
                         for d2 in devices:
                             d2 = reader_dev(node, d2)
                             if d2 != d and isinstance(value, torch.Tensor):
-                                driver.memcpy(s, self.runner.inboxes[(node.name, index, d2)], value)
+                                inbox = self.runner.inboxes[(node.name, index, d2)]
+                                key = xvalue_wave[(node.name, index, d2)]
+                                if _ring_ok(value, inbox):
+                                    # the ring write: the wave's values go across in one kernel with its flag,
+                                    # launched when the wave ends (below); a value made on the branch is
+                                    # waited for there
+                                    pending[key].append((value, inbox, node.name))
+                                else:
+                                    driver.memcpy(s, inbox, value)
                                 COPY_LOG.append(("value", f"{node.name}[{index}]", str(d), str(d2), tuple(value.shape),
                                                  str(value.dtype), value.numel() * value.element_size()))
-                                key = xvalue_wave[(node.name, index, d2)]
                                 if last_producer[key] == node.name and key not in ended:
                                     ended.append(key)
                     for key in ended:  # the wave's last value copied: its flag, after the copies
-                        driver.write_value(s, wflags[key].data_ptr(), 1)
+                        if pending.get(key):
+                            for _, _, pname in pending[key]:
+                                if pname != node.name and done[pname][0] is not s:
+                                    s.wait_event(done[pname][1])
+                            self._ring_writes += triton_ops.ring_write([(v, i) for v, i, _ in pending.pop(key)],
+                                                                       counters[key], wflags[key], s)
+                        else:
+                            driver.write_value(s, wflags[key].data_ptr(), 1)
                     ev = torch.cuda.Event()
                     ev.record(s)
                     done[node.name] = (s, ev)
@@ -932,7 +959,8 @@ class StepGraph(torch.nn.Module):
         # that run's number goes in under its own name, so "kernels" always means the plain step
         self._stat("kernels_with_expert_stats" if EXPERT_STATS else "kernels", self.node_counts.get("kernels"))
         self._stat("crossings", {"values": len(xvalue_wave), "flags": len(wflags), "input_flags": len(in_flags),
-                                 "step_inputs_copied": len(in_copies)})
+                                 "step_inputs_copied": len(in_copies), "ring_writes": self._ring_writes})
+        self._ring_counters = counters  # the kernels' counters live as long as the graphs
         self._stat("branched_nodes", self._branched)
         if self._branched:
             print(f"[vxpu] step graph: {self._branched} nodes captured on a parallel branch beside the node before them",

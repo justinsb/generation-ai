@@ -202,6 +202,91 @@ def x_mxfp8(x, traced=False):
     return xq, xe
 
 
+# A wave's crossing copies and its flag as one kernel (the ring write), "0" for cuMemcpyAsync per value and a
+# stream memory operation for the flag (the A/B; stepgraph.py).
+RING_WRITE = os.environ.get("VXPU_RING_WRITE", "1") != "0"
+RING_VALUES = 8  # values one ring write kernel carries at most
+RING_BLOCK = 4096  # int32 words a program copies
+
+
+if triton is not None:
+    @triton.jit
+    def _ring_copy(src, dst, n, chunk, BLOCK: tl.constexpr):
+        offs = chunk.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+        m = offs < n
+        tl.store(dst + offs, tl.load(src + offs, mask=m, other=0), mask=m)
+
+    @triton.jit
+    def _ring_write_kernel(s0, d0, n0, s1, d1, n1, s2, d2, n2, s3, d3, n3, s4, d4, n4, s5, d5, n5, s6, d6, n6,
+                           s7, d7, n7, counter_ptr, flag_ptr, total, VALUES: tl.constexpr, FLAG: tl.constexpr,
+                           BLOCK: tl.constexpr):
+        """The ring write: a wave of values crossing to another GPU, copied by this GPU's programs
+        straight into the reader's inboxes (peer access: dst is the reader GPU's memory) and, with
+        FLAG, the wave's flag raised in the reader's memory by the last program to finish. One
+        program per (BLOCK words, value); value v copies s_v -> d_v, n_v int32 words. Every
+        program counts itself on counter_ptr (this GPU's memory, release at system scope after its
+        stores), and the one that makes the count `total` (the grid) resets the counter for the
+        next replay and writes the flag: its acquire of the counter has made every program's
+        stores visible before the flag store, which is what the reader's wait relies on. The
+        step graph captured one copy node per value and a memory operation for the flag before
+        (eight copies a range boundary); this is one kernel a wave."""
+        chunk = tl.program_id(0)
+        v = tl.program_id(1)
+        if v == 0:
+            _ring_copy(s0, d0, n0, chunk, BLOCK)
+        if VALUES > 1:
+            if v == 1:
+                _ring_copy(s1, d1, n1, chunk, BLOCK)
+        if VALUES > 2:
+            if v == 2:
+                _ring_copy(s2, d2, n2, chunk, BLOCK)
+        if VALUES > 3:
+            if v == 3:
+                _ring_copy(s3, d3, n3, chunk, BLOCK)
+        if VALUES > 4:
+            if v == 4:
+                _ring_copy(s4, d4, n4, chunk, BLOCK)
+        if VALUES > 5:
+            if v == 5:
+                _ring_copy(s5, d5, n5, chunk, BLOCK)
+        if VALUES > 6:
+            if v == 6:
+                _ring_copy(s6, d6, n6, chunk, BLOCK)
+        if VALUES > 7:
+            if v == 7:
+                _ring_copy(s7, d7, n7, chunk, BLOCK)
+        if FLAG:
+            tl.debug_barrier()
+            done = tl.atomic_add(counter_ptr, 1, sem="acq_rel", scope="sys")
+            if done == total - 1:
+                tl.atomic_xchg(counter_ptr, 0, sem="relaxed", scope="gpu")
+                tl.store(flag_ptr, 1)
+
+
+def ring_write(pairs, counter, flag, stream):
+    """Launch the ring write for `pairs` [(src, dst)] (contiguous CUDA tensors, src on this GPU,
+    dst its inbox on the reader GPU, equal bytes, a multiple of 4) on `stream`: one kernel per
+    RING_VALUES pairs, the last one raising `flag` (int32 [1] on the reader GPU, 1) once every
+    copy is visible; `counter` is an int32 [1] zero on this GPU, kept across replays. Returns the
+    number of kernels launched."""
+    launched = 0
+    for i in range(0, len(pairs), RING_VALUES):
+        group = pairs[i:i + RING_VALUES]
+        last = i + RING_VALUES >= len(pairs)
+        words = [src.numel() * src.element_size() // 4 for src, _ in group]
+        args = []
+        for (src, dst), n in zip(group, words):
+            args += [src.view(torch.uint8).view(torch.int32), dst.view(torch.uint8).view(torch.int32), n]
+        while len(args) < 3 * RING_VALUES:
+            args += [args[0], args[1], 0]
+        chunks = triton.cdiv(max(words), RING_BLOCK)
+        with torch.cuda.stream(stream), torch.cuda.device(group[0][0].device):
+            _ring_write_kernel[(chunks, len(group))](*args, counter, flag, chunks * len(group), VALUES=len(group),
+                                                     FLAG=last, BLOCK=RING_BLOCK)
+        launched += 1
+    return launched
+
+
 def act_quant_dequant(x, traced=False):
     """The fork's act_quant (32-element blocks, ue8m0 scales) followed by
     the dequantization, for a CUDA tensor whose last dim is a multiple
