@@ -1098,6 +1098,48 @@ workstreams in parallel from the start on the four pods, each change
 with its own measurement, hard interim deadlines, results read from the
 pods' files rather than from watchers.
 
+**Hero 11, the roofline ledger (Nov 1).** The kernel record now carries,
+for every call site, the bytes the site must move, read off the graph
+alone (`lower.site_bytes`): the parameters it reads (a `get_attr`, or the
+export's lifted `p_*` and `c_*` placeholders, also behind a view), the
+activations it reads and writes, and the state buffers it names (`b_*`,
+the caches, of which an op reads a window, so kept apart as an upper
+bound). The hardware section carries the card's bandwidth as the engine
+measured it at load (`plan.gpu_bandwidth`: a 1 GiB device copy, 1,462
+GB/s on the RTX PRO 6000, and a 1 GiB single-tensor read, which the
+floors use when present, since the step reads weights and writes little:
+the head's GEMV measured 1,530 GB/s, above the copy figure), so the
+floors are over the card's own numbers. `vxpu kernels check --record R` prints the ledger
+(`pkg/kernelplan: Ledger`): every site against its floor (weights plus
+activations over the bandwidth), worst first by lost microseconds, the
+per-op totals, and the sites' summed floor against their summed time;
+`--step-times` takes the step's own per-site microseconds in place of
+the lowering's microbenchmark: `dev/hero/ledger.py` joins a kernel
+profile to the sites one layer at a time (the experts' first kernel marks
+each layer; within a layer the tail's sites, the shared expert and its
+combine, claim their launches first and the next layer's head after
+them, each site claiming the launches its body declares), and checks that
+every (op, kernel family) received exactly the launches the sites
+declare, so an off-by-one cannot pass silently (the first run of it found
+the router launching 39 times where 40 sites declare it); `--threshold 0.85` fails a
+measured site under 85% of its floor unless the table's entry records an
+`accepted` reason (a long-K GEMV that cannot fill the card at one row).
+The table's entries carry the same byte fields and the chosen body's
+microseconds, for the measuring step to fill. None of it knows the model:
+any export's record gets the same ledger, which is what makes it the
+place where "the gap is inside the kernels" becomes a ranked list per
+template and per site. The first ledger of the one-row step (Nov 1,
+pod D, 1,455 kernels, 13.0 ms of GPU time): the sites' floors sum to
+6.0 ms and the experts' to 3.1 (top-k times 40 layers times 18.8 MB), so
+the step is at 70% of its floor; by op from the step's own time, attn_q
+75% (the small wq_a GEMV and its two helper kernels; wq_b itself 98%),
+the shared expert 68% (its dual SwiGLU GEMV 73%), attn_out 90%, the
+head 105% (the copy figure understates reads), the experts 80%, and the
+small ops under 30%: window_kv (3.7 MB in 11.8 µs), the router, the
+attention select and the hyper-connection front, 1.36 ms a step between
+them, latency-bound. By family, gemv_rows 86% over 211 launches, gemv_pe
+98%, the dual GEMV 73%.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers

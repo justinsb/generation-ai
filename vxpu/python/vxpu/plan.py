@@ -181,39 +181,51 @@ def probe_hardware(device):
             props = torch.cuda.get_device_properties(idx)
             hw.update(gpu=props.name, gpu_memory_bytes=props.total_memory,
                       gpu_capability=f"{props.major}.{props.minor}", gpu_count=torch.cuda.device_count())
-            bw = gpu_bandwidth(idx)
-            if bw:
-                hw["gpu_bandwidth_gb_s"] = bw
+            copy, read = gpu_bandwidth(idx)
+            if copy:
+                hw["gpu_bandwidth_gb_s"] = copy
+            if read:
+                hw["gpu_read_bandwidth_gb_s"] = read
     return hw
 
 
 def gpu_bandwidth(index=0, nbytes=1 << 30):
-    """The GPU's memory bandwidth as a device-to-device copy of nbytes
-    measures it (GB/s, the best of three; None without CUDA). The byte
-    floors in the kernel record are over this number (pkg/kernelplan:
-    Ledger), so the record carries the card's own measurement rather than
-    a datasheet figure: an RTX PRO 6000 copies at about 1,460 GB/s."""
+    """The GPU's memory bandwidth as measured on the card itself (GB/s, the
+    best of three; (None, None) without CUDA): a device-to-device copy of
+    nbytes (read and write counted) and a single-tensor read of nbytes (a
+    sum). The byte floors in the kernel record are over the read figure
+    (pkg/kernelplan: Ledger), since the step's kernels read weights and
+    write little: on an RTX PRO 6000 the copy measures about 1,460 GB/s
+    and the read about 1,550, and the head's GEMV was seen at 1,530 GB/s,
+    above the copy figure. The record carries both."""
     import torch
     if not torch.cuda.is_available():
-        return None
+        return None, None
     try:
         with torch.cuda.device(index):
             src = torch.empty(nbytes, dtype=torch.uint8, device="cuda")
             dst = torch.empty_like(src)
             dst.copy_(src)
-            best = None
-            for _ in range(3):
-                start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-                start.record()
-                dst.copy_(src)
-                end.record()
-                end.synchronize()
-                ms = start.elapsed_time(end)
-                best = ms if best is None or ms < best else best
-            del src, dst
-        return round(2 * nbytes / (best * 1e-3) / 1e9, 1)  # read and write
+            as_f32 = src.view(torch.float32)
+            as_f32.sum()
+
+            def best_ms(fn):
+                best = None
+                for _ in range(3):
+                    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                    start.record()
+                    fn()
+                    end.record()
+                    end.synchronize()
+                    ms = start.elapsed_time(end)
+                    best = ms if best is None or ms < best else best
+                return best
+            copy_ms = best_ms(lambda: dst.copy_(src))
+            read_ms = best_ms(lambda: as_f32.sum())
+            del src, dst, as_f32
+        return (round(2 * nbytes / (copy_ms * 1e-3) / 1e9, 1), round(nbytes / (read_ms * 1e-3) / 1e9, 1))
     except (RuntimeError, torch.cuda.OutOfMemoryError):
-        return None
+        return None, None
 
 
 def _simd():

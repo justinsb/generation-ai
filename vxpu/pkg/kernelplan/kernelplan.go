@@ -133,6 +133,11 @@ type Hardware struct {
 	// floors are over it. Zero in an older record: the check takes
 	// --bandwidth-gb-s or the card's known figure (knownBandwidth).
 	BandwidthGBs float64 `json:"gpu_bandwidth_gb_s,omitempty"`
+	// ReadBandwidthGBs is the same card's single-tensor read (a sum over
+	// 1 GiB), the figure the ledger's floors use when present: the step's
+	// kernels read weights and write little, and the head's GEMV was seen
+	// above the copy figure (1,530 against 1,462 GB/s).
+	ReadBandwidthGBs float64 `json:"gpu_read_bandwidth_gb_s,omitempty"`
 }
 
 // Site is one op call site of the lowered graph.
