@@ -1,5 +1,5 @@
 {
- "source": "vxpu plan pipeline (vxpu-big b795382's planner), run on the laptop against the artifacts' bindings; distinct experts a layer given as measured (6 at one row or the same prompt, 37 for 9 different prompts, 100 for 33, 30 with the drafter)",
+ "source": "vxpu plan pipeline (vxpu-big b795382's planner), run on the laptop against the artifacts' bindings; distinct experts a layer given as measured (6 at one row or the same prompt, 37 for 9 different prompts, 100 for 33, 30 with the drafter); the hero 10 wide-batch cases (66, 99 and 132 rows) with vxpu-big 6430bba's planner, distinct experts 100 when the 33-prompt list is cycled (rows with the same prompt select the same experts) and a power-law estimate for different prompts (design.md, hero run 10's prediction)",
  "cases": [
   {
    "rows": 1,
@@ -110,6 +110,105 @@
    "predicted_latency_ms": 31.0,
    "predicted_single_ms": 27.6,
    "ceiling_tokens_per_s": 153
+  },
+  {
+   "rows": 66,
+   "mode": "different",
+   "batches": 1,
+   "prompts": "prompts-32.txt cycled (each prompt twice)",
+   "command": "plan pipeline --artifact rows12-b66 --batches 1 --rows 66 --distinct 100",
+   "predicted_aggregate_tokens_per_s": 603,
+   "predicted_slot_ms": 109.4,
+   "predicted_latency_ms": 109.4,
+   "predicted_single_ms": 109.4,
+   "ceiling_tokens_per_s": 3887
+  },
+  {
+   "rows": 66,
+   "mode": "different",
+   "batches": 1,
+   "prompts": "prompts-132.txt (66 different prompts)",
+   "command": "plan pipeline --artifact rows12-b66 --batches 1 --rows 66 --distinct 169",
+   "predicted_aggregate_tokens_per_s": 439,
+   "predicted_slot_ms": 150.3,
+   "predicted_latency_ms": 150.3,
+   "predicted_single_ms": 150.3,
+   "ceiling_tokens_per_s": 2388,
+   "distinct_source": "estimated: power law through 9 rows (37.3) and 33 rows (100), exponent 0.76"
+  },
+  {
+   "rows": 99,
+   "mode": "different",
+   "batches": 1,
+   "prompts": "prompts-32.txt cycled (each prompt three times)",
+   "command": "plan pipeline --artifact rows12-b99 --batches 1 --rows 99 --distinct 100",
+   "predicted_aggregate_tokens_per_s": 764,
+   "predicted_slot_ms": 129.5,
+   "predicted_latency_ms": 129.5,
+   "predicted_single_ms": 129.5,
+   "ceiling_tokens_per_s": 5830
+  },
+  {
+   "rows": 99,
+   "mode": "different",
+   "batches": 1,
+   "prompts": "prompts-132.txt (99 different prompts)",
+   "command": "plan pipeline --artifact rows12-b99 --batches 1 --rows 99 --distinct 230",
+   "predicted_aggregate_tokens_per_s": 479,
+   "predicted_slot_ms": 206.5,
+   "predicted_latency_ms": 206.5,
+   "predicted_single_ms": 206.5,
+   "ceiling_tokens_per_s": 2671,
+   "distinct_source": "estimated, as above"
+  },
+  {
+   "rows": 132,
+   "mode": "different",
+   "batches": 1,
+   "prompts": "prompts-32.txt cycled (each prompt four times)",
+   "command": "plan pipeline --artifact rows12-b132 --batches 1 --rows 132 --distinct 100",
+   "predicted_aggregate_tokens_per_s": 882,
+   "predicted_slot_ms": 149.7,
+   "predicted_latency_ms": 149.7,
+   "predicted_single_ms": 149.7,
+   "ceiling_tokens_per_s": 7774
+  },
+  {
+   "rows": 132,
+   "mode": "different",
+   "batches": 1,
+   "prompts": "prompts-132.txt (132 different prompts)",
+   "command": "plan pipeline --artifact rows12-b132 --batches 1 --rows 132 --distinct 287",
+   "predicted_aggregate_tokens_per_s": 507,
+   "predicted_slot_ms": 260.4,
+   "predicted_latency_ms": 260.4,
+   "predicted_single_ms": 260.4,
+   "ceiling_tokens_per_s": 2877,
+   "distinct_source": "estimated, as above"
+  },
+  {
+   "rows": 66,
+   "mode": "different",
+   "batches": 2,
+   "prompts": "prompts-32.txt cycled (each prompt twice a batch)",
+   "command": "plan pipeline --artifact rows12-b66 --batches 2 --rows 66 --distinct 100",
+   "predicted_aggregate_tokens_per_s": 1207,
+   "predicted_slot_ms": 54.7,
+   "predicted_latency_ms": 109.4,
+   "predicted_single_ms": 109.4,
+   "ceiling_tokens_per_s": 3887
+  },
+  {
+   "rows": 66,
+   "mode": "different",
+   "batches": 4,
+   "prompts": "prompts-32.txt cycled (each prompt twice a batch)",
+   "command": "plan pipeline --artifact rows12-b66 --batches 4 --rows 66 --distinct 100",
+   "predicted_aggregate_tokens_per_s": 2025,
+   "predicted_slot_ms": 32.6,
+   "predicted_latency_ms": 130.4,
+   "predicted_single_ms": 109.4,
+   "ceiling_tokens_per_s": 3887
   }
  ],
  "note": "The drafter cases' predicted tokens per second count one token a step (the planner's pipeline model does not yet include accepted drafts); multiply by the measured tokens a step (2.67 at one row) to compare. The ceiling is a batch's rows over the slowest range's bytes at one GPU's bandwidth."

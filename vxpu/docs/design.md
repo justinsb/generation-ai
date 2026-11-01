@@ -830,6 +830,58 @@ composing; the consistency checks costing a few percent at most. Risk:
 the batched drafter is new code on the hardest path; the checks go in
 first. Setup: four identical disk-layout pods, two per node.
 
+**Hero run 10, one wide batch against several in flight: the prediction
+(Oct 31, night, written before the artifacts were measured).** The cost
+model calibrated on hero 8 already describes one wide batch: it is the
+single-batch case with more rows. Its bytes are the dense weights (8.5 GB)
+plus the distinct experts a layer times 18.8 MB times 40 layers; its time
+adds 4.1 ms fixed and 0.61 ms a row, the per-row term calibrated between
+1 and 33 rows and extrapolated here (the largest uncertainty in the
+table). One batch streams one GPU at a time, so its step is the sum of
+the four ranges; batches in flight stream all four, so their period is
+the slowest range. The prompts matter: the harness cycles the 33-prompt
+list, so a 132-row batch holds each prompt four times, exactly as four
+batches of 33 did in hero 9 (each prompt four times across the batches).
+Rows with the same prompt decode the same tokens and select the same
+experts, so the 132-row batch reads the experts of 33 distinct rows:
+about 100 a layer, measured at 33 rows. For truly different prompts
+(prompts-132.txt, written for this run) the distinct count is estimated
+from a power law through the measured 9-row (37.3) and 33-row (100)
+counts, exponent 0.76, capped at 384; the run replaces the estimate.
+
+| shape | prompts | distinct experts a layer | step, or per-batch latency | aggregate tok/s |
+|---|---|---|---|---|
+| 4 × 33 in flight (hero 9) | the 33-prompt list in every batch | 100 measured | 106 ms predicted, 94 to 98 measured | 1,243 predicted, 1,414 measured |
+| 1 × 33 (hero 9) | the list once | 100 measured | 89 predicted, 96 measured | 370 predicted, 345 measured |
+| 1 × 66 | the list twice | 100 | 109 | 603 |
+| 1 × 66 | 66 different prompts | 169 estimated | 150 | 439 |
+| 1 × 99 | the list three times | 100 | 130 | 764 |
+| 1 × 99 | 99 different prompts | 230 estimated | 207 | 479 |
+| 1 × 132 | the list four times | 100 | 150 | 882 |
+| 1 × 132 | 132 different prompts | 287 estimated | 260 | 507 |
+| 2 × 66 in flight | the list twice in each batch | 100 | 109 | 1,207 |
+| 4 × 66 in flight | the list twice in each batch | 100 | 130 | 2,025 |
+
+The prediction, in one sentence: at 132 rows the wide batch loses to
+four batches in flight, 882 tok/s against 1,243 predicted (1,414
+measured), with a 150 ms step against 94 to 98 ms, and the loss grows
+when the prompts really differ (507 tok/s). The reason is not bytes: the
+cycled 132-row batch reads the same 83 GB a step as a 33-row batch, so
+its bytes cost 65 ms, the same as the pipeline's four batches put
+together, and it would match the pipeline's throughput if the rest of
+the step cost no more than 0.28 ms a row. The model says it costs 0.61,
+so the wide batch spends 85 ms a step in work that does not scale with
+bytes while the pipeline spreads the same work over four GPUs. What the
+measurement decides is that per-row term at 66 to 132 rows; if it falls
+toward 0.3 ms the shapes tie and the planner's choice comes down to the
+latency budget. Memory: the 12-layer ranges (layers 8 to 20 and 20 to
+32) hold 89 GB of weights on a 96 GB card, so they are where 132 rows'
+caches would run out first; the run records each GPU's memory at every
+width. The planner rule this decides between is in `vxpu plan pipeline`:
+given the rows to serve and a latency budget, it lays the rows out as
+one, two, three or four batches, predicts each, drops the shapes over
+the budget and picks the highest aggregate.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
