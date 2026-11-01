@@ -1021,6 +1021,44 @@ warm-up captured is. Next: diff what `_warm_up`'s capture sees against
 per-segment graphs the pipeline's eager step captures), and the drafter
 side if the warm-up's draft graph is affected the same way.
 
+**Hero run 10, closed (Nov 1, 21:40 UTC).** The run asked whether the
+planner can pick the serving shape. The answer: it can pick between the
+shapes the engine has today, and the run's largest result is that the
+engine's kernel library, not the planner, bounds the shapes worth
+picking. Six workstreams ran in parallel on four identical pods (two per
+node), each change on its own branch with its own measurement, merged
+into vxpu-big through 17f5c4d. Against the acceptance list:
+
+| item | result |
+|---|---|
+| speculation inside the pipeline | works: each batch in flight drafts and verifies on its own graph, acceptance per batch equal to a single batch, tokens identical across batches. Four 1-row batches 250 to 288 tok/s with the drafter against 243 plain; four 8-row batches of one prompt 1,518 against 1,455; with a prompt per row the drafter loses from eight rows up (622 against 781 at four batches of eight; 2× slower at 33), because verifying five positions a row reads many more distinct experts; four 33-row batches with the drafter do not fit in memory |
+| adaptive speculation | modelled and plumbed, not yet measured in the engine: the plan file's `speculation` section carries the draft length and a policy (fixed, confidence, expert-aware), `vxpu/speculation.py` applies it, the cost model predicts the five measured speculative steps within 8%; the adaptive policies' parameters are estimates until the engine records the confidence histogram |
+| one wide batch against batches in flight | batches in flight win, 1,414 to 1,462 tok/s for four batches of 33 against 444 for one batch of 132 (297 ms a step). The reason is a cliff in the kernel library at 64 rows (the one-pass kernels and fused bodies hand over to reference bodies: 14,686 launches a step in place of 1,977), not the shape; the planner now refuses to plan a batch wider than the library's row limit, and the missing piece is a GEMM template for wide rows |
+| per-batch efficiency, the launch count | launches fell by a quarter at one row (1,372 to 1,045 kernels, 35 copy nodes to 12) and the step did not move: 13.3 ms before and after. The GEMV prologue recode removes 284 launches but lengthens every GEMV (1.1 ms worse at nine rows), so it is off by default and a per-shape choice for the planner; the shared-expert join is off until its epilogue and the split pair agree bit for bit; the ring write (a wave's copies and flag as one kernel) is on and neutral |
+| self-tests built in | three standing checks, on by default in development: golden tokens at load (1.3 to 2.6 s), a duplicate row padded into every batch and compared every step, and the reference implementation run beside the chosen body on a sample of steps (430 ms a sample, under 2% of decode). Their cost on the step is zero at one and nine rows. The duplicate-row check passed on the wide steps; the reference check puts every op within 0.4% of its reference except attn_select at 3.3% at nine rows |
+| the planner predicts | pipeline and speculation models within 8% on the measured cases (the wide batch excepted, where the model did not know the library's row limit; it does now) |
+
+Found and fixed on the way: four 9-row batches of different prompts
+were not batch-identical on the base tree (wrong in four of six runs,
+always batches 0 and 1, plausible alternative tokens); the defect needs
+the engine's warm-up step graph running beside another batch's graph
+with both attention islands present, and every batch in flight now gets
+a state and graph of its own (clean in six of six, step times
+unchanged; the cause inside the warm-up graph is still open). Found and
+filed: the n-gram tables' population reads a cold disk one page at a
+time, 3 MB/s on a disk that reads at 1.2 GB/s (#504). Still open from
+this run: the GEMM template for wide rows; the producer-side MXFP8
+recode (codes written once by the producer, which the measurement says
+is the form that pays); the drafter's memory at four batches of 33; the
+hero harness's one-row reference (`alone-tokens.json`) is stale at
+position 26 and the artifacts were re-exported, so the token checks in
+this run are against same-tree controls; a per-batch latency spread in
+the 1-row drafter pipeline (27 against 35 ms). What the one-row step
+says about where the ceiling is: 13.3 ms against a byte floor of 8.9,
+with the GPUs busy for 12.7 to 13.4 ms of it, so the remaining gap is
+inside the kernels (their bandwidth efficiency), not in launches,
+crossings or host work.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
