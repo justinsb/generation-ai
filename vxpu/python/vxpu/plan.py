@@ -44,6 +44,7 @@ artifact without loading its weights.
 
 import argparse
 import collections
+import contextlib
 import contextvars
 import dataclasses
 import json
@@ -233,6 +234,29 @@ def implementation(op, name, devices, numerics, when, applies=None, reference=Fa
                                  fused))
         return fn
     return register
+
+
+_checking = threading.local()
+
+
+@contextlib.contextmanager
+def checking(wrap):
+    """While the block runs in this thread, every Plan.select returns
+    wrap(plan, op, impl, device_type, key) instead of impl: the reference
+    check (checks.py) wraps each chosen implementation with one that runs
+    the reference beside it. Thread-local, so the step host's threads and
+    other batches' loops dispatch as usual."""
+    previous = getattr(_checking, "wrap", None)
+    _checking.wrap = wrap
+    try:
+        yield
+    finally:
+        _checking.wrap = previous
+
+
+def reference_of(op):
+    """The registered reference implementation of op, or None."""
+    return next((i for i in REGISTRY[op] if i.reference), None)
 
 
 def _available(impl, device_type):
@@ -613,6 +637,29 @@ class Plan:
         gb, src = env_number("VXPU_BF16_CACHE_HEADROOM_GB", 4.0, float, minimum=0)
         self._set("bf16_cache_headroom_gb", gb, src, (), "device memory the bf16 copies must leave free")
 
+        # the standing checks (checks.py), on by default in development: each
+        # off by its switch, and the record carries whether it ran and what it cost
+        on, src = env_flag("VXPU_CHECK_GOLDEN", True)
+        self._set("check_golden", on, src, (True, False),
+                  "after warm-up, decode the model's golden prompts and compare the tokens (golden.json in the "
+                  "artifact, or fixtures/golden/<model>.json)")
+        n, src = env_number("VXPU_CHECK_DUPLICATE_ROWS", 1, int, minimum=0)
+        self._set("check_duplicate_rows", n, src, (0, 1),
+                  "rows a generate_rows call pads with a copy of a decoding row, whose tokens must equal the "
+                  "original's every step (0: off)")
+        n, src = env_number("VXPU_CHECK_REFERENCE", 50, int, minimum=0)
+        self._set("check_reference_every", n, src, (0, 50),
+                  "every N decode steps, run the step again through the reference implementations beside the "
+                  "chosen bodies and compare (0: off)")
+        budget, src = env_number("VXPU_CHECK_REFERENCE_BUDGET", 0.02, float, minimum=0)
+        self._set("check_reference_budget", budget, src, (),
+                  "the reference check's share of the decode time: a sample waits until the run has decoded for "
+                  "cost / budget since the last one")
+        mode, src = env_choice("VXPU_CHECK_ON_MISMATCH", "stop", ("stop", "warn"))
+        self._set("check_on_mismatch", mode, src, ("stop", "warn"),
+                  "what a failed check does: stop the run (the engine refuses to serve, a generate call fails) "
+                  "or print a warning and note it in the plan")
+
     def _set(self, name, value, source, alternatives=(), doc=""):
         self.choices[name] = Choice(value, source, tuple(alternatives), doc)
 
@@ -676,6 +723,9 @@ class Plan:
                 else:
                     self._shapes[(op, impl.name)] += 1
             self._selections[record] += 1
+        wrap = getattr(_checking, "wrap", None)
+        if wrap is not None:  # the reference check runs in this thread: it sees every dispatch (checks.py)
+            return wrap(self, op, impl, device_type, key)
         return impl
 
     # ---- the record

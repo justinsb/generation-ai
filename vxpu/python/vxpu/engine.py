@@ -50,7 +50,7 @@ import torch
 
 from typing import NamedTuple
 
-from . import kernels, lower, ops, rehydrate, segments, vxpu_pb2  # noqa: F401  (registers vxpu::* before a graph that calls them is loaded)
+from . import checks, kernels, lower, ops, rehydrate, segments, vxpu_pb2  # noqa: F401  (registers vxpu::* before a graph that calls them is loaded)
 from .plan import Plan
 from .plan import record as plan_record
 from .telemetry import Recorder, segment_info
@@ -212,6 +212,7 @@ class Engine:
         from . import physplan
         physplan.apply_env()  # VXPU_PLAN=path: the plan file's ranges and kernel table, as the switches below
         self.plan = Plan(device, compile_decode=compile_decode, external_dir=external_dir, given=plan_given)
+        self.checks = checks.Checks(self)  # the standing self-checks (checks.py), by the plan's switches
         # Where the tensors the graphs call out for (expert banks, n-gram
         # tables) are placed: None keeps them in host memory; a directory
         # (local SSD) memory-maps them from files there, the page cache
@@ -421,6 +422,7 @@ class Engine:
 
         self.load_breakdown = ", ".join(parts)
         self.plan.note(f"load: {self.load_breakdown}")
+        self.checks.golden()  # the model's golden prompts, decoded and compared; a mismatch refuses the load
 
         print("[vxpu] " + self.plan.summary(self.plan_ops()).replace("\n", "\n[vxpu] "), flush=True)
 
@@ -868,6 +870,7 @@ class Engine:
         self._bind(scratch)  # aliases -> the canonical tensors, both graphs
         self._decode_run = self._decode
         self._prefill_run = self._prefill
+        self.checks.keep_logical(self._decode)  # the graph as exported, before the lowering: the reference check's
         if self.compile_decode:
             strip_asserts(self._decode)
             configure_inductor(self.plan)
@@ -1518,13 +1521,15 @@ class Engine:
         for request in requests:
             self._check_prompt(request.prompt)
         waiting = sorted(range(len(prompts)), key=lambda i: arrivals[i])
+        # the duplicate-row check: a free row gets a copy of a decoding row (checks.Padding)
+        pad = self.checks.padding(requests, self.binding.get("batch", 1), batches, batch_of, telemetry)
         if batches > 1:
             if telemetry or not all(self._native_rows(r.sampler) for r in requests):
                 raise ValueError("batches in flight need the captured step graph's native loop, "
                                  "no telemetry and no repetition penalty")
-            return self._generate_rows_pipeline(requests, waiting, arrivals, batches, batch_of)
+            return self._generate_rows_pipeline(requests, waiting, arrivals, batches, batch_of, pad)
         if not telemetry and all(self._native_rows(r.sampler) for r in requests):
-            return self._generate_rows_native(requests, waiting, arrivals)
+            return self._generate_rows_native(requests, waiting, arrivals, pad)
         step_ms, rows_active = [], []
         recorder = None
         with self._lock:
@@ -1544,9 +1549,16 @@ class Engine:
                         while row is not None and waiting and arrivals[waiting[0]] <= step:
                             rows.admit(requests[waiting.pop(0)], row)
                             row = rows.free_row()
+                        if pad is not None:  # a copy takes a row no real prompt wants now, and gives it back
+                            due = bool(waiting) and arrivals[waiting[0]] <= step
+                            shadow = pad.next([rows.requests[r] for r in rows.active()]) if row is not None and not due else None
+                            if shadow is not None:
+                                rows.admit(shadow, row)
+                            elif row is None and due:
+                                pad.make_room()
                         rows.emit()
                         if rows.active():
-                            rows_active.append(len(rows.active()))
+                            rows_active.append(len([r for r in rows.active() if rows.requests[r].shadow_of is None]))
                             step_ms.append(rows.step())
                             if recorder is not None:
                                 recorder.step_ms.append(step_ms[-1])
@@ -1558,16 +1570,16 @@ class Engine:
                         self._decode_split.set_recorder(None)
         out = {"token_ids": [r.token_ids for r in requests], "prefill_ms": [r.prefill_ms for r in requests],
                "step_ms": step_ms, "rows_active": rows_active,
-               "drafted": rows.drafted, "accepted": rows.accepted}
+               "drafted": rows.drafted, "accepted": rows.accepted, "padded_rows": len(pad.shadows) if pad else 0}
         if recorder is not None:
             recorder.phase = "decode"
             out["telemetry"] = recorder.result(plan_record(self.explain()))
         return out
 
-    def _generate_rows_native(self, requests, waiting, arrivals):
+    def _generate_rows_native(self, requests, waiting, arrivals, pad=None):
         """generate_rows on the native loop (_NativeRows): the loop steps by itself, and a prompt
         joins at the first boundary after the loop has run `arrivals[i]` steps (at once when no
-        row decodes)."""
+        row decodes). `pad` (checks.Padding) fills a row no prompt wants with a copy of one."""
         with self._lock:
             rows = _NativeRows(self)
             try:
@@ -1579,14 +1591,24 @@ class Engine:
                                and (arrivals[waiting[0]] <= rows.loop.steps() or not rows.requests)):
                             rows.admit(requests[waiting.pop(0)], row)
                             row = rows.free_row()
+                        if pad is not None:
+                            due = bool(waiting) and (arrivals[waiting[0]] <= rows.loop.steps() or not rows.requests)
+                            shadow = pad.next(list(rows.requests.values())) if row is not None and not due else None
+                            if shadow is not None:
+                                rows.admit(shadow, row)
+                            elif row is None and due:
+                                pad.make_room()
                         rows.pump(0.001 if waiting else 0.05)
+                        if self.checks.reference_due(rows.loop.steps()):
+                            self.checks.reference_native(rows.loop, self._decode_split, self._live_state(rows.state),
+                                                         {q.row: q for q in rows.requests.values()})
                 steps = rows.loop.take_steps()
                 drafted, accepted = rows.loop.drafts()
             finally:
                 rows.close()
         return {"token_ids": [r.token_ids for r in requests], "prefill_ms": [r.prefill_ms for r in requests],
-                "step_ms": [ms for ms, _ in steps], "rows_active": [n for _, n in steps if n],
-                "drafted": drafted, "accepted": accepted, "native": True}
+                "step_ms": [ms for ms, _ in steps], "rows_active": self.checks.rows_active(steps, pad.shadows if pad else []),
+                "drafted": drafted, "accepted": accepted, "native": True, "padded_rows": len(pad.shadows) if pad else 0}
 
     def generate_batches(self, prompt_lists, max_new_tokens, params):
         """generate_rows with one batch per list in `prompt_lists`, all in flight at once (the
@@ -1612,7 +1634,7 @@ class Engine:
             at += k
         return results
 
-    def _generate_rows_pipeline(self, requests, waiting, arrivals, batches, batch_of=None):
+    def _generate_rows_pipeline(self, requests, waiting, arrivals, batches, batch_of=None, pad=None):
         """generate_rows with `batches` batches in flight (_PipelineRows): batch b holds its own
         state and captured step graphs and decodes on a native loop of its own, on streams of its
         own, so the GPUs work on different batches' layer ranges at once. With a drafter, each
@@ -1642,14 +1664,30 @@ class Engine:
                                 rows.admit(requests[i], b, row)
                                 progressed = True
                                 row = rows.free_row(b)
+                            if pad is not None:
+                                due = bool(queue) and (arrivals[queue[0]] <= rows.loops[b].steps() or not rows.requests[b])
+                                shadow = pad.next(list(rows.requests[b].values()), b) if row is not None and not due else None
+                                if shadow is not None:
+                                    rows.admit(shadow, b, row)
+                                    progressed = True
+                                elif row is None and due:
+                                    pad.make_room(b)
                         rows.pump(0.001 if (waiting or progressed) else 0.02)
+                        for b, loop in enumerate(rows.loops):
+                            if self.checks.reference_due(loop.steps()):
+                                self.checks.reference_native(loop, rows.graphs[b], rows.states[b],
+                                                             {q.row: q for q in rows.requests[b].values()})
+                                break
                 steps = [loop.take_steps() for loop in rows.loops]
                 drafts = [loop.drafts() for loop in rows.loops]
             finally:
                 rows.close()
         flat = [ms for per in steps for ms, _ in per]
+        shadows = pad.shadows if pad else []
         return {"token_ids": [r.token_ids for r in requests], "prefill_ms": [r.prefill_ms for r in requests],
-                "step_ms": flat, "rows_active": [n for per in steps for _, n in per if n],
+                "step_ms": flat, "padded_rows": len(shadows),
+                "rows_active": [n for b, per in enumerate(steps)
+                                for n in self.checks.rows_active(per, [s for s in shadows if s.batch == b])],
                 "batch_step_ms": [[ms for ms, _ in per] for per in steps],
                 "batch_rows": [assigned[i] for i in range(len(requests))],
                 "batch_drafted": [d for d, _ in drafts], "batch_accepted": [a for _, a in drafts],
@@ -1869,10 +1907,16 @@ class Engine:
             if len(cached) >= self.max_cache_len:
                 break
             step_started = time.perf_counter() if recorder is not None else 0.0
+            check = self.checks.reference_due(step + 1)
+            if check:
+                self.checks.snapshot(self._live_state(session["state"]))
             logits = self._decode_run(
                 input_ids=torch.tensor([[next_id]], device=self.device),
                 cache_position=torch.tensor([len(cached)],
                                             device=self.device))
+            if check:
+                self.checks.reference_step(torch.tensor([[next_id]]), torch.tensor([len(cached)]), [0], logits=logits,
+                                           steps=step + 1)
             cached.append(next_id)
             if logits_sink is not None:
                 logits_sink(step + 1, logits[0, -1])
@@ -1907,9 +1951,16 @@ class _Request:
         self.token_ids, self.finish_reason, self.cancelled = [], None, False
         self.prefill_ms = 0.0
         self.first_token_at = self.done_at = None
+        # the duplicate-row check (checks.Padding): a copy points at its original, an original lists
+        # its copies, and both name the Checks that compares them as they emit
+        self.shadow_of, self.shadows, self.checks = None, [], None
+        self.row = self.batch = 0  # where it decodes, for the check's messages
+        self.admitted_at = self.finished_at = None  # the loop's step count when it joined and left
 
     def emit(self, token_id):
         self.token_ids.append(token_id)
+        if self.checks is not None:
+            self.checks.row_token(self)
         if self.first_token_at is None:
             self.first_token_at = time.perf_counter()
         if self.sink is not None:
@@ -2036,6 +2087,7 @@ class _Rows:
         if engine.step_tokens > 1:
             self.drafter = _ModelDrafter(engine) if engine._draft_run is not None else _LookupDrafter()
         self.drafted = self.accepted = 0
+        self.steps_done = 0
 
     def bind(self):
         self.engine._bind(self.state)
@@ -2051,6 +2103,7 @@ class _Rows:
         """Prefill request in row 0, then move its state to `row` (_prefill_row)."""
         logits = _prefill_row(self.engine, self.state, request, row, self.requests[0] is not None)
         self.requests[row], self.fed[row] = request, list(request.prompt)
+        request.row = row
         self.pending[row] = [request.sampler.pick(logits[0, -1], self.fed[row])]
 
     def emit(self):
@@ -2093,7 +2146,14 @@ class _Rows:
         if self.drafter is not None:
             drafts = self.drafter.propose(self, ids, position, e.step_tokens - 1)
             tokens = [[t] + d for t, d in zip(ids, drafts)]
+        self.steps_done += 1
+        check = e.checks.reference_due(self.steps_done)  # the reference check: the state before the step, then the step
+        if check:
+            e.checks.snapshot(e._live_state(self.state))
         logits = e._decode_run(input_ids=torch.tensor(tokens, device=e.device), cache_position=position)
+        if check:
+            e.checks.reference_step(torch.tensor(tokens, device=e.device), position, self.active(), logits=logits,
+                                    steps=self.steps_done)
         for row in self.active():
             request, fed, kept = self.requests[row], self.fed[row], []
             for j, token_id in enumerate(tokens[row]):
@@ -2152,6 +2212,7 @@ class _NativeRows:
                 request.finish("length")
             else:
                 self.requests[id(request)] = request
+                request.row, request.admitted_at = row, self.loop.steps()
                 sampler = request.sampler  # its settings, in the graph (stepgraph.choose)
                 self.loop.admit(row, id(request), first, len(request.prompt), 1, request.max_new_tokens,
                                 sorted(request.eos_ids), e.max_cache_len,
@@ -2173,6 +2234,7 @@ class _NativeRows:
                 request.emit(token_id)
             if finish:
                 del self.requests[rid]
+                request.finished_at = self.loop.steps()
                 if finish in self.FINISH:
                     request.finish(self.FINISH[finish])
                 elif error:
@@ -2271,6 +2333,7 @@ class _PipelineRows:
                 request.finish("length")
             else:
                 self.requests[b][id(request)] = request
+                request.row, request.batch, request.admitted_at = row, b, loop.steps()
                 sampler = request.sampler
                 loop.admit(row, id(request), first, len(request.prompt), 1, request.max_new_tokens,
                            sorted(request.eos_ids), e.max_cache_len,
@@ -2294,6 +2357,7 @@ class _PipelineRows:
                     request.emit(token_id)
                 if finish:
                     del requests[rid]
+                    request.finished_at = loop.steps()
                     if finish in self.FINISH:
                         request.finish(self.FINISH[finish])
                     elif error:
