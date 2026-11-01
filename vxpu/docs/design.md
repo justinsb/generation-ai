@@ -1059,6 +1059,45 @@ with the GPUs busy for 12.7 to 13.4 ms of it, so the remaining gap is
 inside the kernels (their bandwidth efficiency), not in launches,
 crossings or host work.
 
+**Hero run 11's acceptance, agreed Nov 1 (afternoon): every kernel
+against its own floor, then the planner tunes the templates.** Hero 10
+left the one-row step at 13.3 ms with the GPUs busy for 12.7 of them,
+against a byte floor of 8.9: the remaining gap is inside the kernels.
+The profile of the control run puts it in three places: the dense GEMV
+templates (gemv_rows, gemv_pe, the dual SwiGLU GEMV: 6.5 ms over 286
+launches, most of the 8.5 GB of dense weights, efficiency unknown per
+site because the record carries microseconds and not bytes), the fp4
+expert kernels (3.8 ms over 78 launches for about 4.5 GB, about 82% of
+bandwidth), and about 1,000 kernels under 5 µs (fronts, stats, post,
+attention pieces: about 1.9 ms that bytes do not explain). The run:
+1. Bytes per site in the kernel record: for every call site the weight
+   bytes and the activation bytes it must move, derived from the binding's
+   shapes, next to the measured microseconds; `vxpu kernels check` prints
+   efficiency per site and per template (sorted worst first) and the step's
+   byte floor; the record's stats carry the per-template totals. This is
+   the roofline ledger, and it is model-agnostic: any export's record gets
+   it.
+2. The measuring step: `vxpu kernels measure` enumerates a template's knob
+   sets (block rows, K step, warps, split-K, the experts' direct-path pair
+   limit) per shape class on the card it runs on, times each, and writes
+   them into the table with their bytes; the planner picks per site from
+   the table; a site under a threshold of its floor without a recorded
+   reason fails the check. The sweep is the system's job (selection), and
+   the table is checked in per card type.
+3. Where the ledger says a site is bound by structure (a long-K GEMV that
+   cannot fill the card at one row), split-K is the one new template.
+4. The latency-bound tail: the sub-5 µs kernels per layer folded by
+   template where the fold does not lengthen the survivor, counted before
+   and after.
+Acceptance: one row at or under 11.5 ms (hero 8's bar), tokens identical
+to the same tree's control; the GEMV and expert templates at 85% of
+bandwidth or better in the ledger at one row; nine rows and 33 rows no
+worse; the ledger and the measuring step land in the repository with
+unit tests that run without a GPU (synthetic record and table). Four
+workstreams in parallel from the start on the four pods, each change
+with its own measurement, hard interim deadlines, results read from the
+pods' files rather than from watchers.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
