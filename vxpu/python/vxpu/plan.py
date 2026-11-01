@@ -845,8 +845,10 @@ class Plan:
             stats = dict(self.stats)
         try:
             from . import triton_ops
-            # the GEMV shape classes launched so far, with the blocks that ran (the measuring step's input)
-            stats["gemv_classes"] = {k: dict(v, blocks=dict(v["blocks"])) for k, v in triton_ops.GEMV_CLASSES.items()}
+            # the GEMV shape classes launched so far, with the blocks that ran (the measuring step's input);
+            # a process that launched none (the CPU, a test) writes no entry
+            if triton_ops.GEMV_CLASSES:
+                stats["gemv_classes"] = {k: dict(v, blocks=dict(v["blocks"])) for k, v in triton_ops.GEMV_CLASSES.items()}
         except ImportError:
             pass
         return {
