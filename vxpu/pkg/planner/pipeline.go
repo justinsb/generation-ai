@@ -68,9 +68,9 @@ type LayerBytes struct {
 	HeadBytes int64 `json:"head_bytes"`
 	// DrafterDenseBytes is the drafter's own dense weights (its stages, not
 	// the shared head and embedding), on the last range when the drafter runs.
-	DrafterDenseBytes int64 `json:"drafter_dense_bytes"`
-	TopK              int   `json:"top_k"`
-	Layers            []LayerBytesEntry
+	DrafterDenseBytes int64             `json:"drafter_dense_bytes"`
+	TopK              int               `json:"top_k"`
+	Layers            []LayerBytesEntry `json:"layers"`
 }
 
 // LayerBytesEntry is one layer's bytes.
@@ -94,6 +94,10 @@ func ReadLayerBytes(manifestJSON, bindingJSON []byte) (LayerBytes, error) {
 		} `json:"tensors"`
 		Config struct {
 			NumExpertsPerTok int `json:"num_experts_per_tok"`
+			// the released checkpoints wrap the language model's config in text_config
+			TextConfig struct {
+				NumExpertsPerTok int `json:"num_experts_per_tok"`
+			} `json:"text_config"`
 		} `json:"config"`
 	}
 	var binding struct {
@@ -119,6 +123,9 @@ func ReadLayerBytes(manifestJSON, bindingJSON []byte) (LayerBytes, error) {
 	}
 	dense := map[int]int64{}
 	lb := LayerBytes{TopK: manifest.Config.NumExpertsPerTok}
+	if lb.TopK == 0 {
+		lb.TopK = manifest.Config.TextConfig.NumExpertsPerTok
+	}
 	for name, t := range binding.Bound {
 		if state[name] {
 			continue

@@ -280,9 +280,12 @@ func runPlanPipeline(ctx context.Context, args []string) error {
 	layersPath := flags.String("layers", "", "the per-layer inventory as JSON instead of an artifact (vxpu plan pipeline --layers-out writes one)")
 	layersOut := flags.String("layers-out", "", "write the artifact's per-layer inventory here")
 	rangesSpec := flags.String("ranges", "0:8,8:20,20:32,32:43", "the layer ranges, one per GPU in step order")
-	batches := flags.Int("batches", 4, "batches in flight")
-	rows := flags.Int("rows", 1, "rows a batch")
+	batches := flags.Int("batches", 4, "batches in flight; 0: the planner lays --rows out as one to as many batches as ranges and picks the shape (hero run 10)")
+	rows := flags.Int("rows", 1, "rows a batch; with --batches 0, the rows to serve at once")
 	distinct := flags.Float64("distinct", 0, "distinct experts a layer the batch selects (default: top-k, the same prompt in every row)")
+	distinctAt := flags.String("distinct-at", "", "measured distinct experts a layer by batch width, ROWS=COUNT,...: the curve --batches 0 estimates each candidate's count from (default: --distinct at every width)")
+	latency := flags.Float64("latency-ms", 0, "with --batches 0, the per-batch step the chosen shape must stay under (0: no budget)")
+	maxRows := flags.Int("max-batch-rows", planner.MaxBatchRows, "with --batches 0, the widest batch the kernels run as planned (the one-pass kernels' row limit)")
 	drafter := flags.Bool("drafter", false, "the step verifies the drafter's tokens (its stages and dense weights run on the last range)")
 	cutsSpec := flags.String("cuts", "", "layers a range may start at, comma-separated (default: any), for --balance")
 	balance := flags.Bool("balance", false, "look for ranges with a shorter slowest range within --budget-gb a GPU")
@@ -320,6 +323,21 @@ func runPlanPipeline(ctx context.Context, args []string) error {
 	}
 	cost := planner.RTXPro6000
 	cost.BandwidthGBs = *bandwidth
+	var choice *planner.ShapeChoice
+	if *batches == 0 {
+		curve, err := distinctCurve(lb, *distinct, *distinctAt)
+		if err != nil {
+			return err
+		}
+		c, err := planner.ChooseLayout(lb, plan, *rows, len(plan.Ranges), *latency, curve, *drafter, cost, *maxRows)
+		if err != nil {
+			return err
+		}
+		choice = &c
+		*batches, *rows, *distinct = c.Chosen.Batches, c.Chosen.RowsPerBatch, c.Chosen.Distinct
+		plan.Pipeline.Batches = *batches
+		plan.Explain = append(plan.Explain, "shape: "+c.Why)
+	}
 	w := planner.Workload{Rows: *rows, DistinctExperts: *distinct, Batches: *batches, Drafter: *drafter}
 	pred, err := planner.PredictPipeline(lb, plan, w, cost)
 	if err != nil {
@@ -342,12 +360,29 @@ func runPlanPipeline(ctx context.Context, args []string) error {
 	}
 	plan.Explain = append(plan.Explain, pred.Basis...)
 	if *asJSON {
-		data, err := json.MarshalIndent(pred, "", " ")
+		var v any = pred
+		if choice != nil {
+			v = choice
+		}
+		data, err := json.MarshalIndent(v, "", " ")
 		if err != nil {
 			return err
 		}
 		fmt.Println(string(data))
 	} else {
+		if choice != nil {
+			fmt.Println("shape: " + choice.Why)
+			for _, cand := range choice.Candidates {
+				fits := "fits"
+				if !cand.Runnable {
+					fits = "wider than the kernels' row limit"
+				} else if !cand.Fits {
+					fits = "over the budget"
+				}
+				fmt.Printf("  %d batches of %3d rows: %5.0f tok/s, a batch step every %5.1f ms, latency %5.1f ms, %3.0f distinct experts a layer (%s)\n",
+					cand.Batches, cand.RowsPerBatch, cand.AggregateTS, cand.Prediction.PeriodMs, cand.LatencyMs, cand.Distinct, fits)
+			}
+		}
 		fmt.Printf("%d batches of %d rows over %d ranges: %.0f tok/s aggregate, a batch step every %.1f ms, latency %.1f ms (one batch alone %.1f); floor %.0f tok/s at the slowest range's bytes\n",
 			*batches, *rows, len(plan.Ranges), pred.AggregateTokS, pred.PeriodMs, pred.LatencyMs, pred.SingleBatchMs, pred.FloorTokS)
 		for _, rc := range pred.Ranges {
@@ -370,4 +405,30 @@ func runPlanPipeline(ctx context.Context, args []string) error {
 		return nil
 	}
 	return os.WriteFile(*out, data, 0o644)
+}
+
+// distinctCurve is what --batches 0 estimates each candidate width's
+// distinct experts from: the measured points of --distinct-at, else a
+// fixed --distinct at every width (0: top-k, the same prompt in every row).
+func distinctCurve(lb planner.LayerBytes, fixed float64, at string) (planner.DistinctCurve, error) {
+	experts := 0
+	for _, l := range lb.Layers {
+		if l.Experts > experts {
+			experts = l.Experts
+		}
+	}
+	curve := planner.DistinctCurve{TopK: lb.TopK, Experts: experts}
+	if at != "" {
+		pts, err := planner.ParseDistinctPoints(at)
+		if err != nil {
+			return curve, err
+		}
+		curve.Points = pts
+		return curve, nil
+	}
+	if fixed > 0 {
+		// the same count at every width: two points on a flat line
+		curve.Points = []planner.DistinctPoint{{Rows: 2, Distinct: fixed}, {Rows: 1 << 20, Distinct: fixed}}
+	}
+	return curve, nil
 }

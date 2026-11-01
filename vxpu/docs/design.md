@@ -874,6 +874,120 @@ prompt in every row; 1,329 against 1,589 with a prompt per row), which
 is inside its error: that crossover is the run's to measure, not the
 model's to call. One wide batch of 132 different prompts 580 against
 1,329 for four of 33, because one batch streams one GPU at a time.
+**Hero run 10, one wide batch against several in flight: the prediction
+(Oct 31, night, written before the artifacts were measured).** The cost
+model calibrated on hero 8 already describes one wide batch: it is the
+single-batch case with more rows. Its bytes are the dense weights (8.5 GB)
+plus the distinct experts a layer times 18.8 MB times 40 layers; its time
+adds 4.1 ms fixed and 0.61 ms a row, the per-row term calibrated between
+1 and 33 rows and extrapolated here (the largest uncertainty in the
+table). One batch streams one GPU at a time, so its step is the sum of
+the four ranges; batches in flight stream all four, so their period is
+the slowest range. The prompts matter: the harness cycles the 33-prompt
+list, so a 132-row batch holds each prompt four times, exactly as four
+batches of 33 did in hero 9 (each prompt four times across the batches).
+Rows with the same prompt decode the same tokens and select the same
+experts, so the 132-row batch reads the experts of 33 distinct rows:
+about 100 a layer, measured at 33 rows. For truly different prompts
+(prompts-132.txt, written for this run) the distinct count is estimated
+from a power law through the measured 9-row (37.3) and 33-row (100)
+counts, exponent 0.76, capped at 384; the run replaces the estimate.
+
+| shape | prompts | distinct experts a layer | step, or per-batch latency | aggregate tok/s |
+|---|---|---|---|---|
+| 4 × 33 in flight (hero 9) | the 33-prompt list in every batch | 100 measured | 106 ms predicted, 94 to 98 measured | 1,243 predicted, 1,414 measured |
+| 1 × 33 (hero 9) | the list once | 100 measured | 89 predicted, 96 measured | 370 predicted, 345 measured |
+| 1 × 66 | the list twice | 100 | 109 | 603 |
+| 1 × 66 | 66 different prompts | 169 estimated | 150 | 439 |
+| 1 × 99 | the list three times | 100 | 130 | 764 |
+| 1 × 99 | 99 different prompts | 230 estimated | 207 | 479 |
+| 1 × 132 | the list four times | 100 | 150 | 882 |
+| 1 × 132 | 132 different prompts | 287 estimated | 260 | 507 |
+| 2 × 66 in flight | the list twice in each batch | 100 | 109 | 1,207 |
+| 4 × 66 in flight | the list twice in each batch | 100 | 130 | 2,025 |
+
+The prediction, in one sentence: at 132 rows the wide batch loses to
+four batches in flight, 882 tok/s against 1,243 predicted (1,414
+measured), with a 150 ms step against 94 to 98 ms, and the loss grows
+when the prompts really differ (507 tok/s). The reason is not bytes: the
+cycled 132-row batch reads the same 83 GB a step as a 33-row batch, so
+its bytes cost 65 ms, the same as the pipeline's four batches put
+together, and it would match the pipeline's throughput if the rest of
+the step cost no more than 0.28 ms a row. The model says it costs 0.61,
+so the wide batch spends 85 ms a step in work that does not scale with
+bytes while the pipeline spreads the same work over four GPUs. What the
+measurement decides is that per-row term at 66 to 132 rows; if it falls
+toward 0.3 ms the shapes tie and the planner's choice comes down to the
+latency budget. Memory: the 12-layer ranges (layers 8 to 20 and 20 to
+32) hold 89 GB of weights on a 96 GB card, so they are where 132 rows'
+caches would run out first; the run records each GPU's memory at every
+width. The planner rule this decides between is in `vxpu plan pipeline`:
+given the rows to serve and a latency budget, it lays the rows out as
+one, two, three or four batches, predicts each, drops the shapes over
+the budget and picks the highest aggregate.
+
+**Hero run 10, one wide batch against several in flight: measured (Nov 1,
+03:33 to 04:25 UTC, pod C, the vxpu-big tree at 6430bba, one process at
+a time under the pod's lock, 64 new tokens, medians over the steps).**
+The wide batch lost, and by more than the model said: 132 rows in one
+batch step in 297 ms (444 tok/s) against 95 to 99 ms a batch step for
+four batches of 33 in flight (1,414 tok/s), a 3.2× gap where the model
+predicted 1.4× (150 ms against 106). The reason is not the shape. Above
+64 rows the kernel library runs out: every one-pass Triton kernel and
+every fused body applies to at most 64 rows (`VXPU_GEMV_ROWS_MAX`), so
+at 66 rows the lowering hands the fp8 linears to a bf16 copy, the
+attention projections, the KV window and the shared expert's front to
+their reference bodies and the head to an f32 copy, and the step
+launches 14,686 kernels in place of 1,977. The jump is a cliff, not a
+slope: 95 ms at 33 rows, 209 at 66, then 0.64 ms a row from 66 to 99
+(the calibrated 0.61). Raising the cap to 132 rows does not help: the
+one-pass kernels tile rows to a power of two, and at 128 and 256 rows
+their tiles need 140 to 164 KB of shared memory against the 101 KB the
+compiler allows, so every width above 64 failed to compile. The missing
+piece is a GEMM template (rows tiled, the weight streamed once per row
+tile) that the planner would choose above the GEMV's handover row count;
+until it exists the planner must know the library's row limit and not
+plan a batch wider than it.
+
+| shape | prompts | distinct experts a layer (measured) | step, median (p10/p90) | tok/s, rows over the step | model at the measured count | peak GPU memory | tokens against the 33-row reference |
+|---|---|---|---|---|---|---|---|
+| 1 × 33 | the list once | 89.5 | 95.3 ms (77/103) | 346 | 83 ms, 397 | 88.8 GB | the reference |
+| 1 × 66 | the list twice | 91.5 | 209.2 (191/218) | 315 | 104 ms, 632 | 89.9 | 4 of 66 rows match; the rest differ from step 2 to 53 (median 23) |
+| 1 × 66 | 66 different | 91.0 | 212.9 (164/227) | 310 | 104 ms, 634 | 89.9 | the reference for the per-row runs |
+| 1 × 99 | the list three times | 89.4 | 230.4 (202/242) | 430 | 123 ms, 803 | 90.6 | 18 of 99 match |
+| 1 × 99 | 99 different | 111.4 | 240.4 (188/260) | 412 | 136 ms, 726 | 90.6 | 7 of the 66 shared prompts match |
+| 1 × 132 | the list four times | 144.0 | 297.0 (237/317) | 444 | 176 ms, 751 | 90.8 | 12 of 132 match |
+| 1 × 132 | 132 different | 126.7 | 286.3 (224/309) | 461 | 166 ms, 798 | 90.8 | 12 of 99 shared match |
+| 4 × 33 in flight | the list in every batch | 89.4 | 95.4 to 98.6 a batch | 1,414 (the harness's strict aggregate) | 99 ms, 1,337 | 92.3 | 33 of 33 in every batch |
+| 2 × 66 and 4 × 66 in flight | the list twice a batch | | out of memory | | 104 ms, 1,265 | 97.2 on GPU 1 | |
+
+Memory: the 132-row batch fits with room (90.8 GB of 97.9 on the
+fullest GPU, the 8-to-20 range) and takes less than four batches of 33
+(92.3 GB), since one batch holds one set of step graphs and buffers.
+Two batches of 66 do not fit: the second batch's step graph on GPU 1
+ran out at 97.2 GB while being captured, so batches in flight pay about
+1.2 GB a batch of 33 and more a batch of 66 on the fullest GPU. The
+distinct-expert counts at 66 and 99 rows with the list cycled (91.5,
+89.4) match the 33-row count, as rows with the same prompt should; the
+132-row count of 144 does not, and the 132 different prompts selected
+fewer (126.7) than the 99 did at 111.4 would suggest, so the counter at
+that width is in question (open). The tokens above 64 rows differ from
+the 33-row reference in most rows, from step 2 in some: the reference
+bodies the width falls back to round differently from the kernels. The
+rows do agree with each other: the duplicate-row invariant, run as its
+own check after the table (the list four times in the 132-row batch,
+twice in the 66-row batch), found every prompt's copies decoding the
+same 64 tokens (33 of 33 prompts at both widths; 132 rows at 251 ms a
+step in that run). So the wide steps are slow and differently rounded,
+not wrong. The model, given the measured counts, predicts the wide
+steps at 104 to 176 ms; measured 209 to 297, because it does not know
+the library's row limit. What the
+planner takes from this: a batch wider than the kernels' row limit is
+not a candidate, and the shape choice (vxpu plan pipeline --batches 0)
+now marks such widths and never picks them (--max-batch-rows lifts the
+limit for the day a GEMM template serves them); the memory check should
+count each batch's graphs on the fullest GPU (open). The pipeline
+line reproduced hero 9 exactly (1,414 tok/s then and now).
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's

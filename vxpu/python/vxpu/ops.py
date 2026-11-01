@@ -1191,7 +1191,7 @@ def _ffn_front_fused(stream, pre_mix, hc_fn, hc_scale, hc_base, hc_mult, sinkhor
                 "group of experts (hundreds of short programs); then the Sinkhorn iterations and the top-k choice "
                 "per row over the summed partials (measured on an RTX PRO 6000 at one row with a cold L2: 13.5 us "
                 "against the one-pass pair's 31.5)",
-                applies=lambda plan, rows=0, experts=0, topk=0, hc_mult=0, dim=0, **_: plan["triton"] and rows <= 64
+                applies=lambda plan, rows=0, experts=0, topk=0, hc_mult=0, dim=0, **_: plan["triton"] and rows <= FP8_GEMV_MAX_ROWS
                 and experts <= 1024 and topk <= 16 and hc_mult in (2, 4, 8) and dim % 32 == 0, lowerable=True)
 def _ffn_front_triton_split(stream, pre_mix, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, hc_eps, norm_weight,
                             norm_eps, gate_weight, gate_bias, topk, score_func, gate_temp, norm_topk_prob, route_scale,
@@ -1205,7 +1205,7 @@ def _ffn_front_triton_split(stream, pre_mix, hc_fn, hc_scale, hc_base, hc_mult, 
                 "two Triton kernels, each program walking the whole row: the norm statistics, the mix dots and the "
                 "gate's scores per group of experts, then the Sinkhorn iterations and the top-k choice per row "
                 "(aten launches about fifteen)",
-                applies=lambda plan, rows=0, experts=0, topk=0, hc_mult=0, dim=0, **_: plan["triton"] and rows <= 64
+                applies=lambda plan, rows=0, experts=0, topk=0, hc_mult=0, dim=0, **_: plan["triton"] and rows <= FP8_GEMV_MAX_ROWS
                 and experts <= 1024 and topk <= 16 and hc_mult in (2, 4, 8) and dim % 32 == 0, lowerable=True)
 def _ffn_front_triton(stream, pre_mix, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, hc_eps, norm_weight,
                       norm_eps, gate_weight, gate_bias, topk, score_func, gate_temp, norm_topk_prob, route_scale,
@@ -1473,7 +1473,7 @@ def _hc_front_fused(stream, pre_mix, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn
                 "ffn_front's split kernels without the gate: the norms' statistics per chunk, then the mix dots and "
                 "the normalized row per chunk, then the Sinkhorn iterations (one row, cold L2, RTX PRO 6000: 6.8 us "
                 "against the one-pass pair's 14.7)",
-                applies=lambda plan, rows=0, hc_mult=0, dim=0, **_: plan["triton"] and rows <= 64
+                applies=lambda plan, rows=0, hc_mult=0, dim=0, **_: plan["triton"] and rows <= FP8_GEMV_MAX_ROWS
                 and hc_mult in (2, 4, 8) and dim % 32 == 0, lowerable=True)
 def _hc_front_triton_split(stream, pre_mix, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, hc_eps, norm_weight,
                            norm_eps, tk=triton_ops):
@@ -1485,7 +1485,7 @@ def _hc_front_triton_split(stream, pre_mix, hc_fn, hc_scale, hc_base, hc_mult, s
 @implementation("vxpu::hc_front", "gpu-triton", ("cuda",), "rounding",
                 "ffn_front's two Triton kernels without the gate: the mix dots, the stream's collapse and the norm, "
                 "then the Sinkhorn iterations (aten launches about six)",
-                applies=lambda plan, rows=0, hc_mult=0, dim=0, **_: plan["triton"] and rows <= 64
+                applies=lambda plan, rows=0, hc_mult=0, dim=0, **_: plan["triton"] and rows <= FP8_GEMV_MAX_ROWS
                 and hc_mult in (2, 4, 8) and dim % 32 == 0, lowerable=True)
 def _hc_front_triton(stream, pre_mix, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, hc_eps, norm_weight,
                      norm_eps, tk=triton_ops):
