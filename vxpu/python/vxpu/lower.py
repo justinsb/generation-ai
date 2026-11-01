@@ -119,6 +119,62 @@ def _value(gm, arg):
     return arg
 
 
+# ops that alias their first argument: a view of a parameter is still the parameter's bytes
+_ALIASING = {"view", "reshape", "permute", "transpose", "t", "getitem", "slice", "select", "squeeze", "unsqueeze",
+             "expand", "contiguous", "alias", "detach", "_to_copy", "to", "clone", "view_as", "flatten", "narrow",
+             "unbind", "split", "chunk", "as_strided"}
+
+
+def _root(node):
+    """The node whose storage a view-like chain of nodes aliases: the
+    parameter behind a permute, the activation behind a reshape."""
+    seen = 0
+    while isinstance(node, torch.fx.Node) and node.op in ("call_function", "call_method") and seen < 16:
+        packet = getattr(node.target, "overloadpacket", None)  # aten.permute.default -> permute
+        name = (packet.__name__ if packet is not None else getattr(node.target, "__name__", str(node.target)))
+        name = name.split(".")[-1].rstrip("_")
+        if name not in _ALIASING or not node.args or not isinstance(node.args[0], torch.fx.Node):
+            break
+        node = node.args[0]
+        seen += 1
+    return node
+
+
+def site_bytes(gm, node):
+    """The bytes a call site must move, from the graph alone: the
+    parameters it reads (weights and scales: a get_attr, or the export's
+    lifted placeholders p_* and c_*), the activations it reads and writes
+    (every other input, and its outputs), and the state buffers it names
+    (b_*: the caches, of which an op may read a window, so an upper bound
+    kept apart). Together with the measured microseconds this is the
+    site's line in the roofline ledger (pkg/kernelplan: Ledger); the floor
+    is weights plus activations over the card's bandwidth."""
+    out = {"weights": 0, "activations": 0, "state": 0}
+    seen = set()
+    for arg in pytree.tree_leaves(node.args):
+        if not isinstance(arg, torch.fx.Node):
+            continue
+        try:
+            value = _value(gm, arg)
+        except _NoShapes:
+            continue
+        root = _root(arg)
+        if root.op == "get_attr" or root.name.startswith(("p_", "c_")):
+            kind = "weights"
+        elif root.name.startswith("b_"):
+            kind = "state"
+        else:
+            kind = "activations"
+        for t in pytree.tree_leaves(value):
+            if isinstance(t, torch.Tensor) and (root.name, kind) not in seen:
+                out[kind] += t.numel() * t.element_size()
+        seen.add((root.name, kind))
+    for t in pytree.tree_leaves(node.meta.get("val")):
+        if isinstance(t, torch.Tensor):
+            out["activations"] += t.numel() * t.element_size()
+    return out
+
+
 def _implementation(op, impl):
     """A function computing op's result with impl, its kernels traced."""
     def fn(*args):
@@ -369,7 +425,7 @@ def lower(gm, plan, layer_device=None):
         if op not in ops.SELECTION or node.kwargs:
             report[op]["kept"]["(not lowerable)"] += 1
             plan.record_site(op=op, site=site, node=node.name, layer=layer, chosen=None, source="kept",
-                             why="not lowerable")
+                             why="not lowerable", bytes=site_bytes(gm, node))
             continue
         try:
             args = _value(gm, node.args)
@@ -396,7 +452,7 @@ def lower(gm, plan, layer_device=None):
         target = devices.get(node)
         entry = dict(op=op, site=site, node=node.name, shapes=key, layer=layer, chosen=impl.name, source=source,
                      candidates=candidates, fused=fused, measured_us=times or None,
-                     device=str(target) if target is not None else None)
+                     device=str(target) if target is not None else None, bytes=site_bytes(gm, node))
         if not impl.lowerable:
             report[op]["kept"][impl.name] += 1
             plan.record_site(kernels=None, **entry)

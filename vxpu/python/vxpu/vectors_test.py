@@ -809,6 +809,9 @@ def _check_plan_table():
                                             "L__self___model_layers_1": ("model.layers.1", "Block"),
                                             "wkv": ("model.layers.1.engram.wkv", "Linear")}
             p.choices["fuse"].value = ()
+            for n in gm.graph.nodes:  # the export lifts parameters as p_* placeholders: name them so for the bytes
+                if n.op == "placeholder" and n.name.split("_")[0] in ("w", "sc"):  # make_fx names them w_1, sc_1
+                    n.name = "p_" + n.name
             report = lower.lower(gm, p)
             if report.get("vxpu::fp8_linear", {}).get("kept", {}).get("reference") != 1:
                 raise SystemExit(f"plan table: the lowering should keep the table's reference body: {report}")
@@ -819,6 +822,10 @@ def _check_plan_table():
                     or sites[0]["site"] != "model.layers.1.engram.wkv" or sites[0]["shapes"] != "1x8->16" \
                     or sites[0]["layer"] != 1 or sites[0]["kernels"] is not None:
                 raise SystemExit(f"plan table: the record's site row is wrong: {sites}")
+            # the ledger's bytes: the weight (16x8 fp8) and its scale (1 byte) are parameters, x (1x8 bf16) and
+            # the output (1x16 bf16) activations
+            if sites[0]["bytes"] != {"weights": 129, "activations": 48, "state": 0}:
+                raise SystemExit(f"plan table: the record's site bytes are wrong: {sites[0]['bytes']}")
             with open(record_path) as f:
                 written = json.load(f)
             if written["format"] != plan.RECORD_FORMAT or written["knobs"]["GEMV_ROWS_MAX"] != 16 \

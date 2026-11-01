@@ -181,7 +181,39 @@ def probe_hardware(device):
             props = torch.cuda.get_device_properties(idx)
             hw.update(gpu=props.name, gpu_memory_bytes=props.total_memory,
                       gpu_capability=f"{props.major}.{props.minor}", gpu_count=torch.cuda.device_count())
+            bw = gpu_bandwidth(idx)
+            if bw:
+                hw["gpu_bandwidth_gb_s"] = bw
     return hw
+
+
+def gpu_bandwidth(index=0, nbytes=1 << 30):
+    """The GPU's memory bandwidth as a device-to-device copy of nbytes
+    measures it (GB/s, the best of three; None without CUDA). The byte
+    floors in the kernel record are over this number (pkg/kernelplan:
+    Ledger), so the record carries the card's own measurement rather than
+    a datasheet figure: an RTX PRO 6000 copies at about 1,460 GB/s."""
+    import torch
+    if not torch.cuda.is_available():
+        return None
+    try:
+        with torch.cuda.device(index):
+            src = torch.empty(nbytes, dtype=torch.uint8, device="cuda")
+            dst = torch.empty_like(src)
+            dst.copy_(src)
+            best = None
+            for _ in range(3):
+                start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                start.record()
+                dst.copy_(src)
+                end.record()
+                end.synchronize()
+                ms = start.elapsed_time(end)
+                best = ms if best is None or ms < best else best
+            del src, dst
+        return round(2 * nbytes / (best * 1e-3) / 1e9, 1)  # read and write
+    except (RuntimeError, torch.cuda.OutOfMemoryError):
+        return None
 
 
 def _simd():

@@ -75,6 +75,36 @@ type Entry struct {
 	Shapes string `json:"shapes,omitempty"`
 	Impl   string `json:"impl"`
 	Why    string `json:"why,omitempty"`
+	// The ledger's fields, filled by the measuring step (vxpu kernels
+	// measure) or carried over from the record the table was planned
+	// from: the bytes the site moves and the microseconds the chosen body
+	// took on the table's GPU. Accepted is a recorded reason for a site
+	// that runs under the check's efficiency threshold (a long-K GEMV
+	// that cannot fill the card at one row); without one the check fails
+	// the site.
+	Bytes    *SiteBytes `json:"bytes,omitempty"`
+	Us       float64    `json:"us,omitempty"`
+	Accepted string     `json:"accepted,omitempty"`
+}
+
+// SiteBytes is what a call site must move, from the graph alone
+// (python/vxpu/lower.py: site_bytes): the parameters it reads, the
+// activations it reads and writes, and the state buffers it names (the
+// caches, of which an op may read a window, so an upper bound kept apart).
+// The floor is Weights plus Activations over the card's bandwidth.
+type SiteBytes struct {
+	Weights     int64 `json:"weights"`
+	Activations int64 `json:"activations"`
+	State       int64 `json:"state"`
+}
+
+// Floor returns the bytes the floor counts: the parameters and the
+// activations, not the state (a window of it is read, not the whole).
+func (b *SiteBytes) Floor() int64 {
+	if b == nil {
+		return 0
+	}
+	return b.Weights + b.Activations
 }
 
 // Record is what an engine writes about a run (plan.Plan.kernel_record).
@@ -98,6 +128,11 @@ type Hardware struct {
 	Torch         string `json:"torch"`
 	CUDA          string `json:"cuda"`
 	Triton        string `json:"triton"`
+	// BandwidthGBs is the card's memory bandwidth as the engine measured it
+	// at load (a device-to-device copy; plan.gpu_bandwidth); the ledger's
+	// floors are over it. Zero in an older record: the check takes
+	// --bandwidth-gb-s or the card's known figure (knownBandwidth).
+	BandwidthGBs float64 `json:"gpu_bandwidth_gb_s,omitempty"`
 }
 
 // Site is one op call site of the lowered graph.
@@ -116,6 +151,9 @@ type Site struct {
 	Candidates []string           `json:"candidates"`
 	Fused      []string           `json:"fused"` // candidates the compiler fuses: credited a launch
 	MeasuredUs map[string]float64 `json:"measured_us"`
+	// Bytes is what the site must move (lower.site_bytes); nil in a record
+	// written before the ledger, or for a site without shapes.
+	Bytes *SiteBytes `json:"bytes,omitempty"`
 	// Kernels are the Triton kernels inlined for the body, as the traced
 	// graph names them; empty for a fused body (the compiler's kernels),
 	// nil for a kept call.

@@ -152,5 +152,48 @@ class JoinSharedFfn(unittest.TestCase):
         self.assertIn("vxpu.shared_ffn_combine.default", targets)
 
 
+class SiteBytes(unittest.TestCase):
+    """site_bytes classifies what a call reads by the graph alone: the
+    parameters (get_attr, or the export's p_ and c_ placeholders, also
+    behind a view), the state buffers (b_), and the activations (every
+    other input, and the outputs)."""
+
+    def test_classification(self):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")  # an activation, 1x16 bf16: 32 bytes
+        p = g.placeholder("p_model_w")  # a parameter, 16x8 fp8: 128 bytes
+        b = g.placeholder("b_model_cache")  # a state buffer, 64x8 bf16: 1024 bytes
+        pt = g.call_function(torch.ops.aten.permute.default, (p, [1, 0]))  # a view of the parameter
+        out = g.call_function(torch.ops.aten.mm.default, (x, pt))
+        g.call_function(torch.ops.aten.add.Tensor, (out, b))
+        g.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        with FakeTensorMode() as fake:
+            x.meta["val"] = fake.from_tensor(torch.zeros(1, 16, dtype=torch.bfloat16))
+            p.meta["val"] = fake.from_tensor(torch.zeros(16, 8, dtype=torch.float8_e4m3fn))
+            b.meta["val"] = fake.from_tensor(torch.zeros(64, 8, dtype=torch.bfloat16))
+            pt.meta["val"] = p.meta["val"].permute(1, 0)
+            out.meta["val"] = fake.from_tensor(torch.zeros(1, 8, dtype=torch.bfloat16))
+        add = next(n for n in gm.graph.nodes if n.target == torch.ops.aten.add.Tensor)
+        self.assertEqual(lower.site_bytes(gm, out), {"weights": 128, "activations": 32 + 16, "state": 0})
+        with FakeTensorMode() as fake:
+            add.meta["val"] = fake.from_tensor(torch.zeros(64, 8, dtype=torch.bfloat16))
+        self.assertEqual(lower.site_bytes(gm, add), {"weights": 0, "activations": 16 + 1024, "state": 1024})
+
+    def test_get_attr_is_a_parameter(self):
+        root = torch.nn.Module()
+        root.register_buffer("w", torch.zeros(4, 4, dtype=torch.float32))
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        w = g.get_attr("w")
+        out = g.call_function(torch.ops.aten.mm.default, (x, w))
+        g.output(out)
+        gm = torch.fx.GraphModule(root, g)
+        with FakeTensorMode() as fake:
+            x.meta["val"] = fake.from_tensor(torch.zeros(1, 4))
+            out.meta["val"] = fake.from_tensor(torch.zeros(1, 4))
+        self.assertEqual(lower.site_bytes(gm, out), {"weights": 64, "activations": 16 + 16, "state": 0})
+
+
 if __name__ == "__main__":
     unittest.main()
