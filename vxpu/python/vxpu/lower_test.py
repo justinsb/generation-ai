@@ -137,6 +137,13 @@ class JoinSharedFfn(unittest.TestCase):
         self.assertEqual([str(n.target) for n in gm.graph.nodes if n.op == "call_function"],
                          ["aten._to_copy.default", "vxpu.shared_ffn.default"])
 
+    def test_report_carries_the_count(self):
+        report = {"vxpu::shared_ffn_front": {"lowered": {}, "kept": {}, "measured": {}, "joined": 40}}
+        self.assertIn("40 joined with shared_ffn_combine into shared_ffn", lower.describe(report))
+        # lower() renders the report with the same comprehension: a count is not a mapping
+        self.assertEqual({k: (dict(v) if isinstance(v, dict) else v) for k, v in report["vxpu::shared_ffn_front"].items() if v},
+                         {"joined": 40})
+
     def test_front_with_another_reader_stays(self):
         gm, *_ = self._graph(extra_reader=True)
         self.assertEqual(lower.join_shared_ffn(gm), 0)

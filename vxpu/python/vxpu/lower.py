@@ -255,9 +255,15 @@ _keyed_cache_dir = None
 
 
 def kernel_digest():
-    """A digest of the Triton kernels' source: what the compiled packages and inductor's caches
-    are keyed by, so a changed kernel is never served from an older compilation."""
-    return hashlib.sha256(inspect.getsource(triton_ops).encode()).hexdigest()[:16]
+    """A digest of the Triton kernels' source and of the knobs in effect (plan.KNOBS: the table's
+    and the A/B switches' values): what the compiled packages and inductor's caches are keyed by,
+    so a changed kernel, or a knob that changes what a kernel body launches, is never served from
+    an older compilation. The packages embed the launches a body makes (a package built with the
+    MXFP8 recoding as a separate kernel was served to a process that had turned the prologue on:
+    the same source, the same graph, a different step)."""
+    from . import plan
+    knobs = repr(sorted(plan.effective_knobs().items()))
+    return hashlib.sha256((inspect.getsource(triton_ops) + knobs).encode()).hexdigest()[:16]
 
 
 def key_cache_dir():
@@ -399,7 +405,7 @@ def lower(gm, plan, layer_device=None):
         gm.graph.lint()
         gm.recompile()
     plan.write_record()
-    return {op: {k: dict(v) for k, v in r.items() if v} for op, r in report.items()}
+    return {op: {k: (dict(v) if isinstance(v, dict) else v) for k, v in r.items() if v} for op, r in report.items()}
 
 
 def _device(values):
