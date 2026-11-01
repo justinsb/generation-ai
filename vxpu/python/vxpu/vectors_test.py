@@ -2640,6 +2640,127 @@ def _check_batched_decode(model, artifact, workdir):
     return True
 
 
+def _broken_impl(op, fn, numerics="rounding"):
+    """A context in which `fn` is op's first registered implementation (test only: a deliberately
+    wrong body, for the standing checks to catch)."""
+    import contextlib
+    from .plan import REGISTRY, Impl
+
+    @contextlib.contextmanager
+    def ctx():
+        impl = Impl(op, "broken-test", fn, ("cpu", "cuda"), numerics, "test only: a deliberately wrong body")
+        REGISTRY[op].insert(0, impl)
+        try:
+            yield impl
+        finally:
+            REGISTRY[op].remove(impl)
+    return ctx()
+
+
+def _check_self_checks(model, artifact, workdir):
+    """The standing checks (checks.py) on the tiny model: each passes on the engine as it is, and
+    each catches a deliberately broken implementation of vxpu::fp8_linear: the golden values at
+    load (a body whose output is negated), the duplicate-row invariant (a body that corrupts
+    row 1 only, as the strided copy and the counter race of hero runs 8 and 9 did), and the
+    reference alongside (any body that deviates, on every step here)."""
+    from . import ops
+    from .checks import CheckFailed
+    from .engine import Engine, SamplingParams
+    from .export import export_artifact
+    greedy = SamplingParams(do_sample=False)
+    prompts = [[(11 * i + 7 * j + 5) % 30000 + 100 for j in range(n)] for i, n in enumerate((9, 14))]
+    b3 = os.path.join(workdir, "tiny-deepseek-v41-artifact-b3")
+    if not os.path.exists(os.path.join(b3, "manifest.json")):
+        export_artifact(model, b3, max_cache_len=1024, batch=3)
+
+    def negated(x, w, s):
+        return -ops._fp8_linear_reference(x, w, s)
+
+    def row1_corrupt(x, w, s):
+        y = ops._fp8_linear_reference(x, w, s)
+        if y.shape[0] > 1:
+            y = y.clone()
+            y[1] = -y[1]
+        return y
+
+    env = {"VXPU_CHECK_GOLDEN": "1", "VXPU_CHECK_DUPLICATE_ROWS": "1", "VXPU_CHECK_REFERENCE": "0",
+           "VXPU_CHECK_ON_MISMATCH": "stop"}
+    # 1. golden values: the load passes, and refuses the negated body (the tiny model is insensitive:
+    # negating every fp8 linear's output moves the first token at position 6, and tripling it none)
+    engine = _with_env(env, Engine, artifact)
+    golden = engine.checks.results["golden"]
+    if not (golden.get("ran") and golden.get("ok")):
+        print(f"self-checks: the golden check did not pass at load: {golden}")
+        return False
+    try:
+        with _broken_impl("vxpu::fp8_linear", negated):
+            _with_env(env, Engine, artifact)
+        print("self-checks: the golden check let a negated fp8_linear load")
+        return False
+    except CheckFailed as e:
+        if "golden values" not in str(e) or "differs first at position" not in str(e):
+            print(f"self-checks: the golden check's message should name the first differing position: {e}")
+            return False
+    # with warn, the broken engine loads and the plan notes the failure
+    with _broken_impl("vxpu::fp8_linear", negated):
+        warned = _with_env({**env, "VXPU_CHECK_ON_MISMATCH": "warn"}, Engine, artifact)
+    if not any(n.startswith("check failed: golden values") for n in warned.plan.notes):
+        print(f"self-checks: with VXPU_CHECK_ON_MISMATCH=warn the plan should note the golden mismatch: {warned.plan.notes}")
+        return False
+    # 2. duplicate rows: a free row is padded with a copy and the copy agrees; results exclude it
+    alone = [engine.generate_rows([p], 16, greedy)["token_ids"][0] for p in prompts]
+    batched = _with_env(env, Engine, b3)
+    out = batched.generate_rows(prompts[:1], 16, greedy)
+    dup = batched.checks.results["duplicate_rows"]
+    if out["padded_rows"] != 1 or dup["compared"] < 16 or dup["mismatches"] or out["token_ids"] != alone[:1]:
+        print(f"self-checks: one prompt on three rows should decode beside one copy of itself, compared every "
+              f"token: {out['padded_rows']} padded, {dup}, tokens equal alone: {out['token_ids'] == alone[:1]}")
+        return False
+    if len(out["token_ids"]) != 1 or max(out["rows_active"]) != 1:
+        print(f"self-checks: the copy leaked into the results: {len(out['token_ids'])} token lists, rows active "
+              f"{out['rows_active']}")
+        return False
+    # a copy gives its row to a prompt that arrives later: two prompts on three rows with one copy, the third
+    # prompt arriving at step 3 gets a row, and every prompt matches decoding alone
+    third = [(13 * j + 3) % 30000 + 100 for j in range(17)]
+    alone.append(engine.generate_rows([third], 16, greedy)["token_ids"][0])
+    out = batched.generate_rows(prompts + [third], 16, greedy, arrivals=[0, 0, 3])
+    if out["token_ids"] != alone or out["padded_rows"] < 1:
+        print(f"self-checks: with a later arrival, tokens equal alone: {[a == b for a, b in zip(out['token_ids'], alone)]}, "
+              f"padded {out['padded_rows']}")
+        return False
+    try:  # the second prompt: the first is insensitive to row 1's corruption for over 32 tokens on this tiny model
+        with _broken_impl("vxpu::fp8_linear", row1_corrupt):
+            batched.generate_rows(prompts[1:2], 16, greedy)
+        print("self-checks: the duplicate-row check missed a body that corrupts row 1")
+        return False
+    except CheckFailed as e:
+        if "duplicate rows" not in str(e) or "row 1" not in str(e):
+            print(f"self-checks: the duplicate-row message should name the rows: {e}")
+            return False
+    # 3. the reference alongside: every step here; passes as it is, catches the negated body with its
+    # deviation named per op, and the record carries the samples and their cost
+    engine = _with_env({**env, "VXPU_CHECK_REFERENCE": "1", "VXPU_CHECK_REFERENCE_BUDGET": "0"}, Engine, artifact)
+    out = engine.generate_rows(prompts[:1], 8, greedy)
+    ref = engine.checks.results["reference"]
+    if ref["samples"] < 7 or ref.get("logits_max_rel", 1) != 0 or ref.get("token_flips"):
+        print(f"self-checks: the reference check should sample every step and match the engine's own logits: {ref}")
+        return False
+    try:
+        with _broken_impl("vxpu::fp8_linear", negated):
+            engine.generate_rows(prompts[:1], 8, greedy)
+        print("self-checks: the reference check missed a negated fp8_linear")
+        return False
+    except CheckFailed as e:
+        if "reference alongside" not in str(e) or "vxpu::fp8_linear (broken-test, rounding)" not in str(e):
+            print(f"self-checks: the reference message should name the op, body and deviation: {e}")
+            return False
+    print(f"self-checks: golden values at load ({golden['prompts']} prompts, {golden['tokens']} tokens, "
+          f"{golden['ms']:.0f} ms), the duplicate row ({dup['compared']} tokens compared) and the reference alongside "
+          f"({ref['samples']} samples, {ref['ms']:.0f} ms) pass, and each catches a broken fp8_linear")
+    return True
+
+
 def _check_rings():
     """The message rings (csrc/ring.h): a thread answers every message on one ring with its bytes on
     another, through rings one slot deep and four deep; ring_ping checks every reply is its message.
@@ -2918,6 +3039,8 @@ def selftest(workdir, settings):
             failed.append(name + " (expert mailboxes)")
         if name == "tiny-deepseek-v41" and not _check_batched_decode(model, artifact, workdir):
             failed.append(name + " (batched decode)")
+        if name == "tiny-deepseek-v41" and not _check_self_checks(model, artifact, workdir):
+            failed.append(name + " (self-checks)")
         if name == "tiny-deepseek-v41" and not _check_speculative_decode(model, artifact, workdir):
             failed.append(name + " (speculative decode)")
         if name == "tiny-deepseek-v41" and _cuda() and not _check_native_rows(model, workdir):
