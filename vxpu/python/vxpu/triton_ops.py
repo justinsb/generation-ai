@@ -142,8 +142,35 @@ if triton is not None:
         kb = k0 // 32 + tl.arange(0, BK // 32)
         tl.store(xe_ptr + m * KS + kb, exponent.to(tl.uint8), mask=kb < KS)
 
+    @triton.jit
+    def _mx_recode(x, BM: tl.constexpr, BK: tl.constexpr):
+        """_x_mxfp8_kernel's arithmetic on a tile x [BM, BK] fp32 (bf16 activations on the fp8
+        grid, as loaded) in registers: the fp8 e4m3 codes [BM, BK] and the e8m0 scales [BM, BK /
+        32] uint8 the tensor cores take, the same bits the kernel writes. The native GEMV bodies
+        call it on each x tile they load (RECODE), so the recoding is the GEMV template's
+        prologue and not a launch before every GEMV: at one row the x tile is 16 KB against a
+        weight tile of 128 KB, and the arithmetic is a reduction over 32 elements."""
+        xg = tl.reshape(x, (BM, BK // 32, 32))
+        amax = tl.maximum(tl.max(tl.abs(xg), axis=2), 1e-4)
+        v = amax / 448.0
+        bits = v.to(tl.int32, bitcast=True)
+        exponent = (bits >> 23) & 0xFF
+        exponent = tl.where((bits & 0x7FFFFF) == 0, exponent, exponent + 1)
+        scale = (exponent << 23).to(tl.float32, bitcast=True)
+        q = tl.minimum(tl.maximum(tl.reshape(xg / scale[:, :, None], (BM, BK)), -448.0), 448.0)
+        return q.to(tl.float8e4nv), exponent.to(tl.uint8)
+
 
 MXFP8_NATIVE = os.environ.get("VXPU_MXFP8_NATIVE")  # override: force the native (1) or converting (0) GEMV body (A/B)
+# Where the native bodies recode x to MXFP8: "1" (the default) in the GEMV's own prologue (_mx_recode), "0" in
+# a kernel of its own before every GEMV (x_mxfp8: about 290 launches a decode step). A planner knob; the
+# A/B switch is VXPU_MXFP8_RECODE=0.
+MXFP8_RECODE = os.environ.get("VXPU_MXFP8_RECODE")
+
+
+def _mx_recode_on():
+    """Whether the native bodies recode x themselves (MXFP8_RECODE, default on)."""
+    return MXFP8_RECODE != "0"
 
 
 @functools.lru_cache(maxsize=None)
@@ -320,7 +347,8 @@ if triton is not None:
     def _gemv_rows_kernel(x_ptr, xq_ptr, xe_ptr, w_ptr, s_ptr, y_ptr, res_ptr, post_ptr, comb_ptr, add_ptr, M, N, K, XS, R, KS,
                           HAS_SCALE: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
                           EPI_QUANT: tl.constexpr = False, KSPLIT: tl.constexpr = 1, EPI_HC: tl.constexpr = 0,
-                          HAS_ADD: tl.constexpr = False, NATIVE: tl.constexpr = False):
+                          HAS_ADD: tl.constexpr = False, NATIVE: tl.constexpr = False,
+                          RECODE: tl.constexpr = False):
         """x [M, K] (bf16) times weight [N, K] transposed, every row of x by one pass over the
         weight: a program owns BN weight rows, streams them once, and multiplies each tile by all
         M rows of x on the tensor cores (tl.dot, bf16 in, fp32 accumulation; an fp8 weight times
@@ -328,7 +356,9 @@ if triton is not None:
         cores take the MXFP8 operands as they are: the fp8 weight tile with its e8m0 scales and
         x's fp8 codes and e8m0 scales (xq_ptr, xe_ptr: x_mxfp8's output, the same layout as x
         with K / 32 scales a row), tl.dot_scaled, no conversion in software; the products are
-        the same exact values, the sums come in the tensor core's order. Up to BM rows. With
+        the same exact values, the sums come in the tensor core's order. With RECODE the native
+        body makes x's codes and scales itself from the bf16 tile it loads (_mx_recode; xq_ptr
+        and xe_ptr are then unused). Up to BM rows. With
         EPI_QUANT the bf16 outputs are quantized to the fp8 grid per 32 consecutive outputs of a
         row (the fork's act_quant before the next linear) before the store; BN is then a multiple
         of 32, so a program holds whole blocks. With KSPLIT > 1, that many programs share a row
@@ -357,10 +387,15 @@ if triton is not None:
                 kb = k0 // 32 + tl.arange(0, BK // 32)
                 e = tl.load(s_ptr + (rows // 32)[:, None] * KS + kb[None, :],
                             mask=live[:, None] & (kb < KS)[None, :], other=127)
-                xq = tl.load(xq_ptr + ms[:, None] * XS + g * K + ks[None, :],
-                             mask=mlive[:, None] & kin[None, :], other=0.0)
-                xe = tl.load(xe_ptr + ms[:, None] * (XS // 32) + g * (K // 32) + kb[None, :],
-                             mask=mlive[:, None] & (kb < KS)[None, :], other=127)
+                if RECODE:
+                    x = tl.load(x_ptr + ms[:, None] * XS + g * K + ks[None, :],
+                                mask=mlive[:, None] & kin[None, :], other=0.0).to(tl.float32)
+                    xq, xe = _mx_recode(x, BM, BK)
+                else:
+                    xq = tl.load(xq_ptr + ms[:, None] * XS + g * K + ks[None, :],
+                                 mask=mlive[:, None] & kin[None, :], other=0.0)
+                    xe = tl.load(xe_ptr + ms[:, None] * (XS // 32) + g * (K // 32) + kb[None, :],
+                                 mask=mlive[:, None] & (kb < KS)[None, :], other=127)
                 acc = tl.dot_scaled(w, e, "e4m3", tl.trans(xq), xe, "e4m3", acc)
             else:
                 if HAS_SCALE:
@@ -504,14 +539,16 @@ def gemv_rows(x, weight, scale=None, group_rows=None, out_dtype=torch.bfloat16, 
         w = weight.contiguous()
         s = scale.contiguous().view(torch.uint8) if scale is not None else w
         xc = x.contiguous()
-        xq, xe = x_mxfp8(xc, traced=traced) if native else (xc, xc)
+        recode = native and _mx_recode_on()
+        xq, xe = x_mxfp8(xc, traced=traced) if native and not recode else (xc, xc)
         kernel, ctx = _launcher(_gemv_rows_kernel, x.device, traced)
         with ctx:
             kernel[(triton.cdiv(N, bn), ksplit)](xc, xq, xe, w, s, y, residual, post, comb, add, M, N, K,
                                                 x.shape[1], R, scale.shape[1] if scale is not None else 0,
                                                 HAS_SCALE=scale is not None, BM=bm, BN=bn, BK=bk,
                                                 EPI_QUANT=quant_out, KSPLIT=ksplit, EPI_HC=HC,
-                                                HAS_ADD=hc is not None and hc[3] is not None, NATIVE=native)
+                                                HAS_ADD=hc is not None and hc[3] is not None, NATIVE=native,
+                                                RECODE=recode)
     return y
 
 
@@ -530,7 +567,7 @@ if triton is not None:
     @triton.jit
     def _dual_gemv_swiglu_kernel(x_ptr, xq_ptr, xe_ptr, w1_ptr, s1_ptr, w3_ptr, s3_ptr, h_ptr, M, N, K, KS, limit,
                                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, KSPLIT: tl.constexpr = 1,
-                                 NATIVE: tl.constexpr = False):
+                                 NATIVE: tl.constexpr = False, RECODE: tl.constexpr = False):
         """The SwiGLU front of an FFN for up to BM rows in one pass over both weights: a program
         owns BN rows of w1 and of w3 (fp8, e8m0 block scales), streams them once against all M rows
         of x (bf16 on the fp8 grid), and in its epilogue rounds the two products to bf16 as the
@@ -541,7 +578,8 @@ if triton is not None:
         tile, each reducing a K slice and storing its two fp32 partial sums in h_ptr as [KSPLIT, 2,
         M, N] (gate then up); _swiglu_rows_kernel adds them and does the epilogue (a shared expert
         of 2,304 rows gives 72 programs otherwise). NATIVE as in _gemv_rows_kernel: the tensor
-        cores take both weights' fp8 tiles with their e8m0 scales and x's codes and scales."""
+        cores take both weights' fp8 tiles with their e8m0 scales and x's codes and scales (made
+        from the bf16 tile in the kernel with RECODE)."""
         limit = limit.to(tl.float32)
         pid = tl.program_id(0)
         rows = pid.to(tl.int64) * BN + tl.arange(0, BN)
@@ -559,8 +597,13 @@ if triton is not None:
             smask = live[:, None] & (kb < KS)[None, :]
             wmask = live[:, None] & kin[None, :]
             if NATIVE:
-                xq = tl.load(xq_ptr + ms[:, None] * K + ks[None, :], mask=mlive[:, None] & kin[None, :], other=0.0)
-                xe = tl.load(xe_ptr + ms[:, None] * KS + kb[None, :], mask=mlive[:, None] & (kb < KS)[None, :], other=127)
+                if RECODE:
+                    x = tl.load(x_ptr + ms[:, None] * K + ks[None, :], mask=mlive[:, None] & kin[None, :],
+                                other=0.0).to(tl.float32)
+                    xq, xe = _mx_recode(x, BM, BK)
+                else:
+                    xq = tl.load(xq_ptr + ms[:, None] * K + ks[None, :], mask=mlive[:, None] & kin[None, :], other=0.0)
+                    xe = tl.load(xe_ptr + ms[:, None] * KS + kb[None, :], mask=mlive[:, None] & (kb < KS)[None, :], other=127)
                 xqt = tl.trans(xq)
                 w = tl.load(w1_ptr + rows[:, None] * K + ks[None, :], mask=wmask, other=0.0)
                 e = tl.load(s1_ptr + (rows // 32)[:, None] * KS + kb[None, :], mask=smask, other=127)
@@ -665,11 +708,13 @@ def shared_ffn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized=False, y_exper
         kernel, ctx = _launcher(_dual_gemv_swiglu_kernel, x.device, traced)
         parts = torch.empty(ks, 2, M, I, dtype=torch.float32, device=x.device) if ks > 1 else h
         native = _mx_native(x.device.index)
-        xq8, xe8 = x_mxfp8(xq, traced=traced) if native else (xq, xq)
+        recode = native and _mx_recode_on()
+        xq8, xe8 = x_mxfp8(xq, traced=traced) if native and not recode else (xq, xq)
         with ctx:
             kernel[(triton.cdiv(I, bn), ks)](xq, xq8, xe8, w1.contiguous(), s1.contiguous().view(torch.uint8),
                                             w3.contiguous(), s3.contiguous().view(torch.uint8), parts, M, I, K,
-                                            s1.shape[1], limit, BM=bm, BN=bn, BK=bk, KSPLIT=ks, NATIVE=native)
+                                            s1.shape[1], limit, BM=bm, BN=bn, BK=bk, KSPLIT=ks, NATIVE=native,
+                                            RECODE=recode)
         if ks > 1:  # the epilogue over the partial sums
             epi, ctx = _launcher(_swiglu_rows_kernel, x.device, traced)
             with ctx:
@@ -688,7 +733,8 @@ if triton is not None:
     def _gemv_pe_kernel(x_ptr, xq_ptr, xe_ptr, w_ptr, s_ptr, y_ptr, xn_ptr, nw_ptr, freqs_ptr, start_ptr, sign, M, N, K, KS, R, S, eps,
                         PRO_NORM: tl.constexpr, PRO_ROTARY: tl.constexpr, PRO_QUANT: tl.constexpr,
                         STORE_XN: tl.constexpr, EPI_ROTARY: tl.constexpr, HD: tl.constexpr, RD: tl.constexpr,
-                        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, NATIVE: tl.constexpr = False):
+                        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, NATIVE: tl.constexpr = False,
+                        RECODE: tl.constexpr = False):
         """_gemv_rows_kernel with the work around the GEMV folded in. Prologue, per row of x as it
         is read: RMSNorm with nw_ptr's weight (PRO_NORM; the fork's: fp32, rounded to bf16), then
         quantization to the fp8 grid per 32 elements (PRO_QUANT, act_quant with ue8m0 scales), the
@@ -702,7 +748,8 @@ if triton is not None:
         attention's output. Weight rows come in groups of R, group g reading x[:, g * K:(g + 1)
         * K] (R = N for one group; BN divides R). NATIVE (no prologue: x already on the fp8
         grid) as in _gemv_rows_kernel: the tensor cores take the weight's fp8 tile with its scales
-        and x's codes and scales (xq_ptr, xe_ptr)."""
+        and x's codes and scales (xq_ptr, xe_ptr; made from the bf16 tile in the kernel with
+        RECODE)."""
         eps = eps.to(tl.float32)
         sign = sign.to(tl.float32)
         pid = tl.program_id(0)
@@ -732,9 +779,13 @@ if triton is not None:
                 w = tl.load(w_ptr + rows[:, None] * K + ks[None, :], mask=live[:, None] & kin[None, :], other=0.0)
                 e = tl.load(s_ptr + (rows // 32)[:, None] * KS + kb[None, :],
                             mask=live[:, None] & (kb < KS)[None, :], other=127)
-                xq = tl.load(xq_ptr + g * K + ms[:, None] * XS + ks[None, :], mask=xmask, other=0.0)
-                xe = tl.load(xe_ptr + g * (K // 32) + ms[:, None] * (XS // 32) + kb[None, :],
-                             mask=mlive[:, None] & (kb < KS)[None, :], other=127)
+                if RECODE:
+                    x = tl.load(xb + ms[:, None] * XS + ks[None, :], mask=xmask, other=0.0).to(tl.float32)
+                    xq, xe = _mx_recode(x, BM, BK)
+                else:
+                    xq = tl.load(xq_ptr + g * K + ms[:, None] * XS + ks[None, :], mask=xmask, other=0.0)
+                    xe = tl.load(xe_ptr + g * (K // 32) + ms[:, None] * (XS // 32) + kb[None, :],
+                                 mask=mlive[:, None] & (kb < KS)[None, :], other=127)
                 acc = tl.dot_scaled(w, e, "e4m3", tl.trans(xq), xe, "e4m3", acc)
             else:
                 x = tl.load(xb + ms[:, None] * XS + ks[None, :], mask=xmask, other=0.0).to(tl.float32)
@@ -831,13 +882,14 @@ def attn_q(x, wq_a, sa, norm_weight, norm_eps, wq_b, sb, freqs, start, seqlen, h
                        NORM=True, RD=0, QUANT=True, STORE_PRE=True, BD=BR, KSUM=ks)
         kernel, ctx = _launcher(_gemv_pe_kernel, x.device, traced)
         native = _mx_native(x.device.index)  # no prologue here: qq is on the fp8 grid already
-        qq8, qe8 = x_mxfp8(qq, traced=traced) if native else (qq, qq)
+        recode = native and _mx_recode_on()
+        qq8, qe8 = x_mxfp8(qq, traced=traced) if native and not recode else (qq, qq)
         with ctx:
             kernel[(triton.cdiv(N, bn),)](qq, qq8, qe8, wq_b.contiguous(), sb.contiguous().view(torch.uint8), q, q, qq,
                                          freqs, start, 1.0, M, N, R, sb.shape[1], N, seqlen, 0.0,
                                          PRO_NORM=False, PRO_ROTARY=False, PRO_QUANT=False, STORE_XN=False,
                                          EPI_ROTARY=True, HD=head_dim, RD=rope_dim, BM=bm, BN=bn, BK=bk,
-                                         NATIVE=native)
+                                         NATIVE=native, RECODE=recode)
     lead = tuple(x.shape[:-1])
     return qn.reshape(lead + (R,)), q.reshape(lead + (N,))
 
