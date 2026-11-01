@@ -88,6 +88,17 @@ func TestDistinctExperts_FollowsTheMeasuredPoints(t *testing.T) {
 	if got := DistinctExperts(6, 384, 100000, MixDifferent); got != 384 {
 		t.Errorf("many rows: %.1f, want every expert", got)
 	}
+	// the token curve: one row's five token rows read the measured 18.3; a batch of one
+	// prompt in every row reads the same; eight different prompts at five tokens grow from their 33.8
+	if got := DistinctExpertsOfVerify(6, 384, 1, 5, MixSame); got < 18.2 || got > 18.4 {
+		t.Errorf("one row, five token rows: %.1f distinct experts, want the measured 18.3", got)
+	}
+	if a, b := DistinctExpertsOfVerify(6, 384, 8, 5, MixSame), DistinctExpertsOfVerify(6, 384, 1, 5, MixSame); a != b {
+		t.Errorf("eight rows of one prompt at five tokens read %.1f, one row %.1f: want the same", a, b)
+	}
+	if got := DistinctExpertsOfVerify(6, 384, 8, 5, MixDifferent); got < 100 || got > 106 {
+		t.Errorf("eight different prompts at five tokens: %.1f, want about 103 (33.8 rows' experts times the token curve)", got)
+	}
 	t.Logf("66 rows %.0f, 99 rows %.0f, 132 rows %.0f distinct experts a layer (extrapolated)",
 		DistinctExperts(6, 384, 66, MixDifferent), DistinctExperts(6, 384, 99, MixDifferent), DistinctExperts(6, 384, 132, MixDifferent))
 }
@@ -106,10 +117,11 @@ func TestAcceptance_FitAndTokens(t *testing.T) {
 }
 
 // The choice at each load of hero 10's matrix. The drafter pays at one
-// row (few experts read, the verify's token rows add theirs at one GPU's
-// bandwidth while the step is launch-bound) and the model says it still
-// pays, more narrowly, at 33 rows of different prompts with two drafts:
-// the crossover hero 10 measures.
+// row (few experts read, the verify's token rows add theirs while the step
+// is launch-bound); at 33 rows a batch the token rows' own cost outweighs
+// the tokens they yield with one prompt in every row, and the model calls
+// it close to even with a prompt per row (two drafts under the experts
+// policy ahead by its estimated saving): the crossover hero 10 measures.
 func TestChooseShape_Hero10Loads(t *testing.T) {
 	lb := drafterLayers(t)
 	p := hero8Plan(t, 4)
@@ -121,7 +133,7 @@ func TestChooseShape_Hero10Loads(t *testing.T) {
 		{Load{Rows: 1, Mix: MixSame, Drafter: true, MaxDraft: 5}, true, 1},
 		{Load{Rows: 4, Mix: MixDifferent, Drafter: true, MaxDraft: 5}, true, 4},
 		{Load{Rows: 132, Mix: MixDifferent, Drafter: true, MaxDraft: 5}, true, 4},
-		{Load{Rows: 132, Mix: MixSame, Drafter: true, MaxDraft: 5}, true, 4},
+		{Load{Rows: 132, Mix: MixSame, Drafter: true, MaxDraft: 5}, false, 4},
 		{Load{Rows: 132, Mix: MixDifferent, Drafter: false}, false, 4},
 	}
 	for _, c := range loads {

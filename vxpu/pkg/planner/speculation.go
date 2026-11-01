@@ -38,7 +38,10 @@ import (
 // tokens 42.9 ms with one prompt in every row and 97.1 ms with a prompt per
 // row (2.37 and 2.71 tokens a step). The distinct experts a layer a batch
 // reads: 6 at one row or one prompt, 37.3 at 9 different prompts, 90.3 at
-// 33 (VXPU_EXPERT_STATS=1, hero 9's runs).
+// 33 (VXPU_EXPERT_STATS=1, hero 9's runs); the five token rows of one
+// row's verify read 18.3 (Nov 1, pod hero-d, specm5-b1): consecutive
+// tokens of a row overlap more than rows of different prompts do (22.9 on
+// the rows curve) and far more than independent draws would (29).
 
 // SpecCost is what a speculative step costs beyond the pipeline model.
 type SpecCost struct {
@@ -66,10 +69,11 @@ type SpecCost struct {
 }
 
 // RTXPro6000Spec is the speculative step's calibration on hero 8's
-// machine: with the distinct experts of the verify's token rows taken from
-// the rows curve (DistinctExperts), the drafter's step and the token rows'
-// cost fit the five measured cases within 10% (speculation_test.go).
-var RTXPro6000Spec = SpecCost{DrafterStepMs: 1.5, PerDraftRowMs: 0.35, ConfidencePrecision: 0.5, ConfidenceLoss: 0.1, PreferGain: 0.25}
+// machine: with the distinct experts of the verify's token rows from the
+// measured token curve (DistinctExpertsOfVerify), the drafter's step and
+// the token rows' cost fit the five measured cases within 10%
+// (speculation_test.go).
+var RTXPro6000Spec = SpecCost{DrafterStepMs: 3.0, PerDraftRowMs: 0.45, ConfidencePrecision: 0.5, ConfidenceLoss: 0.1, PreferGain: 0.25}
 
 // Acceptance is the drafter's per-position acceptance rate: a draft at
 // position i (after i-1 accepted drafts) is accepted with probability
@@ -150,6 +154,24 @@ func DistinctExperts(topK, experts int, n int, mix string) float64 {
 	return float64(topK)
 }
 
+// tokenCurve is the distinct experts a layer the t consecutive token rows
+// of one row's verify select, as a power of t fitted to the measured 18.3
+// at five tokens (top-6 of 384): 6 * t^0.69.
+const tokenCurve = 0.693
+
+// DistinctExpertsOfVerify is the distinct experts a layer a verify of rows
+// rows with tokens token rows each reads: the rows' count for their first
+// tokens (DistinctExperts) times the token curve's growth, never more than
+// the layer has. With one prompt in every row the rows read the same, so
+// it is the token curve alone.
+func DistinctExpertsOfVerify(topK, experts, rows int, tokens float64, mix string) float64 {
+	rowsDistinct := DistinctExperts(topK, experts, rows, mix)
+	if tokens <= 1 {
+		return rowsDistinct
+	}
+	return math.Min(rowsDistinct*math.Pow(tokens, tokenCurve), float64(experts))
+}
+
 // SpecPrediction is what the model predicts for a speculating pipeline.
 type SpecPrediction struct {
 	Pipeline      PipelinePrediction     `json:"pipeline"`
@@ -212,14 +234,10 @@ func PredictSpeculation(lb LayerBytes, p *kernelplan.PipelinePlan, w Workload, m
 				spec.Candidates, spec.MaxNewExperts, newPerToken, allowed, spec.Draft, sc.PreferGain*100))
 		}
 	}
-	// the distinct experts of the verify: its token rows on the rows curve
-	// (consecutive tokens of a row overlap about as rows of different prompts
-	// do, by the five measured cases), less what the experts policy saves
+	// the distinct experts of the verify: the rows' for their first tokens,
+	// grown by the token curve, less what the experts policy saves
 	tokenRows := float64(w.Rows) * (1 + drafted)
-	distinct := DistinctExperts(topK, experts, int(math.Round(tokenRows)), MixDifferent)
-	if mix == MixSame {
-		distinct = DistinctExperts(topK, experts, int(math.Round(1+drafted)), MixDifferent)
-	}
+	distinct := DistinctExpertsOfVerify(topK, experts, w.Rows, 1+drafted, mix)
 	if spec.Policy == kernelplan.PolicyExperts && drafted > 0 {
 		base := DistinctExperts(topK, experts, w.Rows, mix)
 		distinct = base + (distinct-base)*(1-sc.PreferGain)
@@ -243,7 +261,7 @@ func PredictSpeculation(lb LayerBytes, p *kernelplan.PipelinePlan, w Workload, m
 			rc.Ms += extra
 		}
 		summarize(&base, w.Rows, w.Batches, len(p.Ranges))
-		basis = append(basis, fmt.Sprintf("%.1f drafts a row verified as %.1f token rows: %.0f distinct experts a layer (the rows curve), %.2f ms a token row and the drafter's %.1f ms a step on the last range",
+		basis = append(basis, fmt.Sprintf("%.1f drafts a row verified as %.1f token rows: %.0f distinct experts a layer (the rows curve times the token curve), %.2f ms a token row and the drafter's %.1f ms a step on the last range",
 			drafted, tokenRows, distinct, sc.PerDraftRowMs, sc.DrafterStepMs))
 	}
 	pr.Pipeline = base

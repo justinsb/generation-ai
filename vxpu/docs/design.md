@@ -844,29 +844,34 @@ applies it with the pure functions in `vxpu/speculation.py`
 per-position acceptance and confidence into the record. The speculative
 step's model (`pkg/planner/speculation.go`): a step with k drafts a row
 verifies k+1 token rows, reads the dense weights once and the experts
-once per distinct expert the token rows select, pays 0.35 ms a token row
-and 1.5 ms for the drafter's graphs on the last range, and yields
+once per distinct expert the token rows select, pays 0.45 ms a token row
+and 3.0 ms for the drafter's graphs on the last range, and yields
 1 + α + ... + α^k tokens at a per-position acceptance α of 0.68 (fitted
 to the measured 2.67 tokens a step at four drafts). The distinct experts
-a layer follow the measured rows curve (6 at one row or one prompt, 37.3
-at 9 different prompts, 90.3 at 33, log-linear between and extended past
-33 as an estimate), and the token rows of one row's verify sit on the
-same curve: so calibrated, the model is within 10% of the five measured
-speculative steps (one row at 2, 4 and 5 drafts; eight rows at 4 drafts,
-one prompt and a prompt per row). What it predicts, and the run
-measures (`dev/hero/predictions.json`, 54 cases; "fixed" is the engine's
-policy today, the adaptive ones rest on estimated parameters until the
-engine records the confidence histogram): at one row four drafts yield
-99 tok/s (measured 103) and the confidence policy at five drafts 107;
-four batches of one row with four drafts 307 against 259 plain; four
-batches of eight rows of different prompts 819 with four drafts against
-782 plain, and 952 under the experts policy; at 33 rows of different
-prompts the verify's token rows read most of the layer and drafting
-stops paying beyond two drafts (four batches of 33: 1,329 plain, 1,425
-at two drafts, 1,156 at five); one wide batch of 132 different prompts
-580 against 1,329 for four of 33, because one batch streams one GPU at a
-time. The crossover the planner names is the one the batched-drafter
-and wide-batch workstreams measure.
+a layer: across rows the measured curve (6 at one row or one prompt,
+37.3 at 9 different prompts, 90.3 at 33, log-linear between and extended
+past 33 as an estimate); along a row's verify the token curve measured
+on Nov 1 (pod hero-d, specm5-b1, VXPU_EXPERT_STATS=1): the five token
+rows of one row read 18.3 distinct experts a layer, not the 30 of
+independent draws, so consecutive tokens share more experts than rows
+of different prompts do. So calibrated, the model is within 7% of the
+five measured speculative steps (one row at 2, 4 and 5 drafts; eight
+rows at 4 drafts, one prompt and a prompt per row). What it predicts,
+and the run measures (`dev/hero/predictions.json`, 54 cases; "fixed" is
+the engine's policy today, the adaptive ones rest on estimated
+parameters until the engine records the confidence histogram): at one
+row four drafts yield 101 tok/s (measured 103) and the confidence policy
+at five drafts 106; four batches of one row with four drafts 276
+against 259 plain; four batches of eight rows of different prompts 796
+with two drafts against 782 plain (749 with four), and 859 under the
+experts policy; at 33 rows a batch the token rows' own cost outweighs
+the tokens they yield with one prompt in every row (four batches of 33:
+3,394 plain, 3,183 at two drafts) and comes out about even with a
+prompt per row (1,329 plain, 1,358 at two drafts, 1,167 at four); one
+wide batch of 132 different prompts 580 against 1,329 for four of 33,
+because one batch streams one GPU at a time. The crossover the planner
+names, between one and two drafts at 33 rows, is the one the
+batched-drafter and wide-batch workstreams measure.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
