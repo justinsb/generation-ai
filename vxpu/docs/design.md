@@ -988,6 +988,38 @@ now marks such widths and never picks them (--max-batch-rows lifts the
 limit for the day a GEMM template serves them); the memory check should
 count each batch's graphs on the fullest GPU (open). The pipeline
 line reproduced hero 9 exactly (1,414 tok/s then and now).
+**Hero run 10, first finding (Nov 1): the pipeline's batch 0 leaves the
+engine's own graph.** The batched-drafter work found four 9-row batches
+of different prompts not batch-identical on the base tree. The
+reproduction, six samples per case on pod B: base 4 of 6 wrong, always
+batches 0 and 1 and never 2 or 3; two batches alone 3 of 6; the wrong
+tokens are plausible alternatives (coherent text), so a small numeric
+perturbation, not garbage. Ruled out: the replica windows (off: 4 of 5
+wrong), the parallel branch (off: 3 of 6), the islands' overlap with the
+node before them (made to wait: 3 of 6), the prefill (every prompt
+admitted before any step: 1 of 6), nondeterminism of one batch (two runs
+token-identical), memory reuse of anything the warm-up graph captured
+(an allocation-history probe found none), the engine's single-batch runs
+before the pipeline (none: 2 of 6). Two facts localize it: batch 0
+on a graph captured by `_pipeline_graph` like the others, instead of the
+graph the warm-up captured on the resident state, is clean 6 of 6; and
+the plan must have both attention islands as separate segments (attn_q
+alone, window_kv alone and no islands are clean, 0 of 6, 0 of 6, 0 of
+4). The fix in place is the first fact made the default: every batch in
+flight gets a state and a graph of its own, and the warm-up graph serves
+single batches only (one more state of 0.17 GB and one more capture at
+the first pipeline call). The cause is not named yet. The two suspects:
+something the warm-up graph holds is not private to it (its runner is
+the engine's, the split it was captured through is re-pointed by every
+admission, and the engine's own loop and prefill drove it before the
+pipeline did), or the island plan's view-only segment between the two
+islands, whose output is a reinterpretation of its input. A second graph
+captured on the resident state through `_pipeline_graph`, run as batch
+0, is clean 6 of 6: the resident state is not the carrier, the graph the
+warm-up captured is. Next: diff what `_warm_up`'s capture sees against
+`_pipeline_graph`'s (the runner, its placement, the counters' scope, the
+per-segment graphs the pipeline's eager step captures), and the drafter
+side if the warm-up's draft graph is affected the same way.
 
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
