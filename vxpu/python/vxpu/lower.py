@@ -93,6 +93,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from . import costs, ops, triton_ops
+from . import segments
 from .segments import HOST_OPS
 
 
@@ -254,9 +255,15 @@ _keyed_cache_dir = None
 
 
 def kernel_digest():
-    """A digest of the Triton kernels' source: what the compiled packages and inductor's caches
-    are keyed by, so a changed kernel is never served from an older compilation."""
-    return hashlib.sha256(inspect.getsource(triton_ops).encode()).hexdigest()[:16]
+    """A digest of the Triton kernels' source and of the knobs in effect (plan.KNOBS: the table's
+    and the A/B switches' values): what the compiled packages and inductor's caches are keyed by,
+    so a changed kernel, or a knob that changes what a kernel body launches, is never served from
+    an older compilation. The packages embed the launches a body makes (a package built with the
+    MXFP8 recoding as a separate kernel was served to a process that had turned the prologue on:
+    the same source, the same graph, a different step)."""
+    from . import plan
+    knobs = repr(sorted(plan.effective_knobs().items()))
+    return hashlib.sha256((inspect.getsource(triton_ops) + knobs).encode()).hexdigest()[:16]
 
 
 def key_cache_dir():
@@ -274,6 +281,53 @@ def key_cache_dir():
         _keyed_cache_dir = os.path.join(os.path.abspath(base), f"vxpu-kernels-{digest}")
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = _keyed_cache_dir
     return _keyed_cache_dir
+
+
+# The shared expert joined back into one op (shared_ffn) when its front is not an island: "1" turns it on,
+# off by default. Measured on four RTX PRO 6000 (hero 10, Nov 1): 40 launches fewer a step (1,082 -> 1,042 at
+# one row) and the step unchanged at one row (13.3 ms) and nine (22.4 / 18.2 / 35.5 one prompt / same / different),
+# because the joined GEMV's hyper-connection epilogue costs what the combine kernel did (the w2 GEMV 10.6 ->
+# 12.9 us against the combine's 1.0); and the tokens are not the pair's: the epilogue sums the mix in another
+# order than the compiler's kernel, a rounding-level difference that moved the greedy choice at token 26 of
+# 64 at one row and in eight of nine rows at nine. Off until the epilogue and the combine agree bit for bit.
+SHARED_FFN_JOIN = os.environ.get("VXPU_SHARED_FFN_JOIN", "0") == "1"
+
+_FRONT, _COMBINE, _JOINED = "vxpu.shared_ffn_front.default", "vxpu.shared_ffn_combine.default", "vxpu.shared_ffn.default"
+
+
+def join_shared_ffn(gm):
+    """Rewrite each shared_ffn_front -> shared_ffn_combine pair into one shared_ffn call: the
+    exported graph calls the shared expert in two ops so that the step graph can run the front
+    beside the routed experts (segments.ISLAND_OPS); when the front is not an island the two run
+    one after the other in one segment, and the pair costs a kernel the joined op does not have.
+    The combine is elementwise work the compiler gives a kernel of its own (the add of the
+    experts' sum, the rounding, the hyper-connection mix: 0.9 us at one row, 40 launches a step),
+    where shared_ffn's Triton body does the same in its last GEMV's epilogue (HAS_ADD, EPI_HC).
+    Joins a pair only when the front's one user is the combine. The new node keeps the combine's
+    recorded value and the front's call site (the site the kernel table names). Returns how many
+    pairs were joined."""
+    joined = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or str(node.target) != _COMBINE or node.kwargs:
+            continue
+        front = node.args[0]
+        if not (isinstance(front, torch.fx.Node) and front.op == "call_function" and str(front.target) == _FRONT
+                and len(front.users) == 1 and not front.kwargs):
+            continue
+        with gm.graph.inserting_before(node):
+            new = gm.graph.call_function(torch.ops.vxpu.shared_ffn.default, tuple(front.args) + tuple(node.args[1:]))
+        new.meta.update(node.meta)
+        for key in ("nn_module_stack", "stack_trace", "source_fn_stack"):
+            if key in front.meta:
+                new.meta[key] = front.meta[key]
+        node.replace_all_uses_with(new)
+        gm.graph.erase_node(node)
+        gm.graph.erase_node(front)
+        joined += 1
+    if joined:
+        gm.graph.lint()
+        gm.recompile()
+    return joined
 
 
 def lower(gm, plan, layer_device=None):
@@ -299,9 +353,13 @@ def lower(gm, plan, layer_device=None):
     Returns {op: {"lowered": {impl: n}, "kept": {impl: n}}} for the calls
     seen; gm is recompiled if anything changed."""
     key_cache_dir()
-    devices = _segment_devices(gm, layer_device)
     report = collections.defaultdict(lambda: {"lowered": collections.Counter(), "kept": collections.Counter(),
                                               "measured": {}})
+    if SHARED_FFN_JOIN and _FRONT not in segments.ISLAND_OPS:
+        joined = join_shared_ffn(gm)
+        if joined:
+            report["vxpu::shared_ffn_front"]["joined"] = joined
+    devices = _segment_devices(gm, layer_device)
     for node in list(gm.graph.nodes):
         target = str(node.target)
         if node.op != "call_function" or not target.startswith("vxpu.") or target in HOST_OPS:
@@ -352,7 +410,7 @@ def lower(gm, plan, layer_device=None):
         gm.graph.lint()
         gm.recompile()
     plan.write_record()
-    return {op: {k: dict(v) for k, v in r.items() if v} for op, r in report.items()}
+    return {op: {k: (dict(v) if isinstance(v, dict) else v) for k, v in r.items() if v} for op, r in report.items()}
 
 
 def _device(values):
@@ -490,7 +548,8 @@ def describe(report):
     for op, r in report.items():
         done = ", ".join(f"{n} {impl}" for impl, n in sorted(r.get("lowered", {}).items()))
         kept = ", ".join(f"{n} {impl}" for impl, n in sorted(r.get("kept", {}).items()))
-        parts.append(f"{op.split('::')[1]}: " + "; ".join(x for x in (done and f"lowered {done}", kept and f"kept {kept}") if x))
+        joined = r.get("joined") and f"{r['joined']} joined with shared_ffn_combine into shared_ffn"
+        parts.append(f"{op.split('::')[1]}: " + "; ".join(x for x in (done and f"lowered {done}", kept and f"kept {kept}", joined) if x))
     return REPORT_PREFIX + (" | ".join(parts) or "none")
 
 

@@ -101,5 +101,56 @@ class InlineOnDevice(unittest.TestCase):
         self.assertEqual({str(v) for v in literals}, {"cuda:1"})
 
 
+class JoinSharedFfn(unittest.TestCase):
+    """join_shared_ffn: a shared_ffn_front -> shared_ffn_combine pair becomes one shared_ffn call
+    with the front's inputs, the combine's inputs, the combine's value and the front's call site;
+    a front with another reader stays."""
+
+    def _graph(self, extra_reader=False):
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        ws = [g.placeholder(n) for n in ("w1", "s1", "w3", "s3", "w2", "s2")]
+        y = g.placeholder("y")
+        residual, post, comb = (g.placeholder(n) for n in ("residual", "post", "comb"))
+        front = g.call_function(torch.ops.vxpu.shared_ffn_front.default, (x, *ws, 10.0, True))
+        front.meta["nn_module_stack"] = _stack("model.layers.3.ffn.shared_experts")
+        yf = g.call_function(torch.ops.aten._to_copy.default, (y,), {"dtype": torch.float32})
+        combine = g.call_function(torch.ops.vxpu.shared_ffn_combine.default, (front, yf, residual, post, comb))
+        combine.meta["val"] = "stream"
+        combine.meta["nn_module_stack"] = _stack("model.layers.3")
+        out = [combine]
+        if extra_reader:
+            out.append(g.call_function(torch.ops.aten.mul.Tensor, (front, 2.0)))
+        g.output(tuple(out))
+        return torch.fx.GraphModule(torch.nn.Module(), g), x, ws, yf, (residual, post, comb)
+
+    def test_joined(self):
+        gm, x, ws, yf, hc = self._graph()
+        self.assertEqual(lower.join_shared_ffn(gm), 1)
+        targets = [str(n.target) for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertNotIn("vxpu.shared_ffn_front.default", targets)
+        self.assertNotIn("vxpu.shared_ffn_combine.default", targets)
+        node = next(n for n in gm.graph.nodes if str(n.target) == "vxpu.shared_ffn.default")
+        self.assertEqual(node.args, (x, *ws, 10.0, True, yf, *hc))
+        self.assertEqual(node.meta["val"], "stream", "the combine's recorded value")
+        self.assertEqual(lower._site(node), ("model.layers.3.ffn.shared_experts", 3), "the front's call site")
+        self.assertEqual([str(n.target) for n in gm.graph.nodes if n.op == "call_function"],
+                         ["aten._to_copy.default", "vxpu.shared_ffn.default"])
+
+    def test_report_carries_the_count(self):
+        report = {"vxpu::shared_ffn_front": {"lowered": {}, "kept": {}, "measured": {}, "joined": 40}}
+        self.assertIn("40 joined with shared_ffn_combine into shared_ffn", lower.describe(report))
+        # lower() renders the report with the same comprehension: a count is not a mapping
+        self.assertEqual({k: (dict(v) if isinstance(v, dict) else v) for k, v in report["vxpu::shared_ffn_front"].items() if v},
+                         {"joined": 40})
+
+    def test_front_with_another_reader_stays(self):
+        gm, *_ = self._graph(extra_reader=True)
+        self.assertEqual(lower.join_shared_ffn(gm), 0)
+        targets = [str(n.target) for n in gm.graph.nodes if n.op == "call_function"]
+        self.assertIn("vxpu.shared_ffn_front.default", targets)
+        self.assertIn("vxpu.shared_ffn_combine.default", targets)
+
+
 if __name__ == "__main__":
     unittest.main()

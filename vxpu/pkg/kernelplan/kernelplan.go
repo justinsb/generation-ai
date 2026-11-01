@@ -253,6 +253,7 @@ func (e Entry) key() string {
 var knobTypes = map[string]string{
 	"GEMV_ROWS_MAX": "int", "FP4_DIRECT_MAX": "int", "FFN_FRONT_EB": "int", "FFN_FRONT_BD": "int",
 	"FRONT_SPLIT_BD": "int", "FRONT_SPLIT_EB": "int", "FP4_KSPLIT": "int", "FP4_NATIVE": "bool", "FP4_DIRECT": "bool",
+	"MXFP8_RECODE": "bool",
 }
 
 func checkKnob(name string, value any) error {
