@@ -165,8 +165,8 @@ class _Job:
         bn, bk, ks = self.bn, self.bk, self.ks
         if N % bn or K % ks or (K // ks) % bk or bk % 32 or bk > K:
             raise ValueError(f"BN={bn} BK={bk} KSPLIT={ks} do not divide N={N}, K={K}")
-        if self.template == "dual_gemv_swiglu" and bn % 32:
-            raise ValueError(f"dual GEMV: BN={bn} must hold whole quantization blocks of 32")
+        if self.template == "dual_gemv_swiglu" and bn % 32 and ks == 1:
+            raise ValueError(f"dual GEMV: BN={bn} must hold whole quantization blocks of 32 when its epilogue is fused")
         if self.template == "gemv_rows":
             if self.quant and bn % 32:
                 raise ValueError(f"quantizing epilogue: BN={bn} must hold whole quantization blocks of 32")

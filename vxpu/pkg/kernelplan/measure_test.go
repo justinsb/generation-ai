@@ -69,7 +69,7 @@ func TestCandidatesFitTheShapeAndStartWithWhatRan(t *testing.T) {
 	}
 	d, _ := ParseClass("dual_gemv_swiglu rows=1 n=2304 k=5120 w=fp8 native=1")
 	for _, b := range Candidates(d, nil, 188) {
-		if b["BN"]%32 != 0 || 2304%b["BN"] != 0 || (5120/b["KSPLIT"])%b["BK"] != 0 {
+		if (b["BN"]%32 != 0 && b["KSPLIT"] == 1) || 2304%b["BN"] != 0 || (5120/b["KSPLIT"])%b["BK"] != 0 {
 			t.Errorf("dual candidate %v", b)
 		}
 	}

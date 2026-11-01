@@ -863,9 +863,9 @@ def shared_ffn(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized=False, y_exper
     native = _mx_native(x.device.index)
     key = gemv_class("dual_gemv_swiglu", M, I, K, "fp8", native=native)
     bm, bn, bk, ks, warps, stages = gemv_blocks(key, bm, bn, bk, ks, allow_ksplit=True, traced=traced)
-    if bn % 32 or I % bn or K % ks or (K // ks) % bk:
+    if (bn % 32 and ks == 1) or I % bn or K % ks or (K // ks) % bk:
         raise ValueError(f"shared_ffn: blocks BN={bn} BK={bk} KSPLIT={ks} do not fit I={I}, K={K} (whole quantization "
-                         f"blocks per program, whole K steps per slice)")
+                         f"blocks per program unless the epilogue runs apart, whole K steps per slice)")
     h = torch.empty(M, I, dtype=torch.bfloat16, device=x.device)
     limit = float(swiglu_limit) if swiglu_limit > 0 else float("inf")
     if M:

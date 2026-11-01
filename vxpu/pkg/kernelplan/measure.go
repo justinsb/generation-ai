@@ -142,7 +142,7 @@ func Candidates(c Class, ran map[string]int, sms int) []map[string]int {
 	var bns, bks, splits, warps []int
 	switch c.Template {
 	case "dual_gemv_swiglu":
-		bns = []int{32, 64}
+		bns = []int{16, 32, 64} // 16 only with a K split: the fused epilogue holds whole blocks of 32
 	case "gemv_pe":
 		bns = []int{16, 32}
 	default:
@@ -157,6 +157,10 @@ func Candidates(c Class, ran map[string]int, sms int) []map[string]int {
 		splits = []int{1, 2, 4, 8, 16}
 	}
 	warps = []int{4, 8}
+	small := int64(c.N)*int64(c.K) < 16<<20 // a weight under 16 MB: a few microseconds a launch, where fewer warps may ramp faster
+	if small {
+		warps = []int{2, 4, 8}
+	}
 	rowsPerGroup := c.N
 	if g := c.field("groups"); g > 1 {
 		rowsPerGroup = c.N / g
@@ -176,6 +180,9 @@ func Candidates(c Class, ran map[string]int, sms int) []map[string]int {
 			return false
 		}
 		if c.Template == "gemv_pe" && (bn%2 != 0 || (hd-rd)%bn != 0) {
+			return false
+		}
+		if c.Template == "dual_gemv_swiglu" && bn%32 != 0 && ks == 1 {
 			return false
 		}
 		if ks > 1 && sms > 0 && (c.N/bn)*(ks/2) >= 2*sms { // the split before this one already filled the card twice
