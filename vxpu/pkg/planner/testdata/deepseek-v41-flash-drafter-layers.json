@@ -1,0 +1,267 @@
+{
+ "model": "",
+ "source": "the specm5-b1 artifact's binding.json and manifest.json (the drafter exported, five tokens a step), Oct 31 2026; top_k set by hand: the manifest's config lacks num_experts_per_tok",
+ "head_bytes": 1390018560,
+ "drafter_dense_bytes": 581044616,
+ "top_k": 6,
+ "layers": [
+  {
+   "layer": 0,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 1,
+   "dense_bytes": 327575512,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 2,
+   "dense_bytes": 186247384,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 3,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 4,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 5,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 6,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 7,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 8,
+   "dense_bytes": 186247384,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 9,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 10,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 11,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 12,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 13,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 14,
+   "dense_bytes": 343769304,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 15,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 16,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 17,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 18,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 19,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 20,
+   "dense_bytes": 181004504,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 21,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 22,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 23,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 24,
+   "dense_bytes": 175629272,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 25,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 26,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 27,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 28,
+   "dense_bytes": 175629272,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 29,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 30,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 31,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 32,
+   "dense_bytes": 175629272,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 33,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 34,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 35,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 36,
+   "dense_bytes": 175629272,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 37,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 38,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 39,
+   "dense_bytes": 170053592,
+   "experts": 384,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 40,
+   "dense_bytes": 0,
+   "experts": 128,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 41,
+   "dense_bytes": 0,
+   "experts": 128,
+   "bytes_per_expert": 18800640
+  },
+  {
+   "layer": 42,
+   "dense_bytes": 0,
+   "experts": 128,
+   "bytes_per_expert": 18800640
+  }
+ ]
+}

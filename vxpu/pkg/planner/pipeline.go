@@ -250,13 +250,10 @@ func PredictPipeline(lb LayerBytes, p *kernelplan.PipelinePlan, w Workload, c Pi
 		return PipelinePrediction{}, fmt.Errorf("workload: rows %d, batches %d: want at least 1 each", w.Rows, w.Batches)
 	}
 	byLayer := map[int]LayerBytesEntry{}
-	backbone := 0
 	for _, l := range lb.Layers {
 		byLayer[l.Layer] = l
-		if l.Layer+1 > backbone {
-			backbone = l.Layer + 1
-		}
 	}
+	backbone := backboneLayers(lb)
 	distinct := w.DistinctExperts
 	if distinct <= 0 {
 		distinct = float64(lb.TopK)
@@ -305,7 +302,41 @@ func PredictPipeline(lb LayerBytes, p *kernelplan.PipelinePlan, w Workload, c Pi
 		totalBytes += dense + experts
 		pr.Ranges = append(pr.Ranges, rc)
 	}
+	k := float64(len(p.Ranges))
+	pr.FloorMs = totalBytes / (bw * k) * 1e3
+	var slowestBytes float64
+	for _, rc := range pr.Ranges {
+		slowestBytes = math.Max(slowestBytes, (rc.DenseGB+rc.ExpertGB)*1e9/bw*1e3)
+	}
+	pr.FloorTokS = float64(w.Rows) / slowestBytes * 1e3
+	summarize(&pr, w.Rows, w.Batches, len(p.Ranges))
+	pr.Basis = append(pr.Basis,
+		fmt.Sprintf("%d rows a batch, %.0f distinct experts a layer, %d batches in flight over %d ranges", w.Rows, distinct, w.Batches, len(p.Ranges)),
+		fmt.Sprintf("bytes at %.0f GB/s a GPU (experts at %.0f%% of it with a prompt per row); fixed %.1f ms a step plus %.2f ms a row, by each range's share of the %d layers",
+			c.BandwidthGBs, efficacy*100, c.FixedMs, c.PerRowMs, backbone),
+		fmt.Sprintf("one batch alone %.1f ms; in the pipeline a batch step completes every %.1f ms (the slowest range) and takes %.1f ms end to end",
+			pr.SingleBatchMs, pr.PeriodMs, pr.LatencyMs))
+	return pr, nil
+}
+
+// backboneLayers is the number of layers the plain step runs: those with
+// dense weights of their own (the drafter's stages have none in the
+// inventory; their dense weights are DrafterDenseBytes).
+func backboneLayers(lb LayerBytes) int {
+	n := 0
+	for _, l := range lb.Layers {
+		if l.DenseBytes > 0 && l.Layer+1 > n {
+			n = l.Layer + 1
+		}
+	}
+	return n
+}
+
+// summarize sums the ranges' times into the step's: one batch alone, the
+// period between batch steps, a batch's latency, and the rates.
+func summarize(pr *PipelinePrediction, rows, batches, ranges int) {
 	var sum, slowest float64
+	pr.Bottleneck = ""
 	for _, rc := range pr.Ranges {
 		sum += rc.Ms
 		if rc.Ms > slowest {
@@ -314,30 +345,18 @@ func PredictPipeline(lb LayerBytes, p *kernelplan.PipelinePlan, w Workload, c Pi
 		}
 	}
 	pr.SingleBatchMs = sum
-	k := float64(len(p.Ranges))
-	n := float64(w.Batches)
+	k := float64(ranges)
+	n := float64(batches)
 	pr.PeriodMs = math.Max(slowest, sum/n)
 	pr.LatencyMs = math.Max(sum, math.Min(n, k)*slowest)
-	pr.AggregateTokS = float64(w.Rows) / pr.PeriodMs * 1e3
-	pr.PerBatchTokS = float64(w.Rows) / pr.LatencyMs * 1e3
-	pr.FloorMs = totalBytes / (bw * k) * 1e3
-	var slowestBytes float64
-	for _, rc := range pr.Ranges {
-		slowestBytes = math.Max(slowestBytes, (rc.DenseGB+rc.ExpertGB)*1e9/bw*1e3)
-	}
-	pr.FloorTokS = float64(w.Rows) / slowestBytes * 1e3
+	pr.AggregateTokS = float64(rows) / pr.PeriodMs * 1e3
+	pr.PerBatchTokS = float64(rows) / pr.LatencyMs * 1e3
 	mean := sum / k
+	pr.BalanceWarning = ""
 	if slowest > mean*1.15 {
 		pr.BalanceWarning = fmt.Sprintf("range %s takes %.1f ms, %.0f%% over the mean of %.1f: the period is its time, the other GPUs idle the rest",
 			pr.Bottleneck, slowest, (slowest/mean-1)*100, mean)
 	}
-	pr.Basis = append(pr.Basis,
-		fmt.Sprintf("%d rows a batch, %.0f distinct experts a layer, %d batches in flight over %d ranges", w.Rows, distinct, w.Batches, len(p.Ranges)),
-		fmt.Sprintf("bytes at %.0f GB/s a GPU (experts at %.0f%% of it with a prompt per row); fixed %.1f ms a step plus %.2f ms a row, by each range's share of the %d layers",
-			c.BandwidthGBs, efficacy*100, c.FixedMs, c.PerRowMs, backbone),
-		fmt.Sprintf("one batch alone %.1f ms; in the pipeline a batch step completes every %.1f ms (the slowest range) and takes %.1f ms end to end",
-			pr.SingleBatchMs, pr.PeriodMs, pr.LatencyMs))
-	return pr, nil
 }
 
 // Balance looks for ranges over the same GPUs that minimize the slowest
