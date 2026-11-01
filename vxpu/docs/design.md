@@ -1140,6 +1140,27 @@ attention select and the hyper-connection front, 1.36 ms a step between
 them, latency-bound. By family, gemv_rows 86% over 211 launches, gemv_pe
 98%, the dual GEMV 73%.
 
+The ledger's first catch was not a slow kernel but a flipped choice. The
+self-tests' golden check refused the merged tree's load of the one-row
+artifact (prompt 0 differed at position 26 from the goldens written on
+6430bba). Checks off and checks on decoded the same tokens with the same
+bodies, so the checks were not the cause; the records were: at all 40
+attn_out sites the lowering's measured choice had flipped. On 6430bba it
+timed the fused body at 58.68 µs and the Triton kernel at 57.64 and ran
+the kernel; on the merged tree 58.49 against 57.60, and with the one
+launch credited to the fused body that is inside 1 µs on a 58 µs pair,
+so run-to-run noise decided it. The fused body is two fp8 GEMVs with a
+quant between them, 83 more kernels a step (1,455 against 1,372), and it
+rounds differently, hence the token. The rule this fixes in place: a
+measured choice that sits inside the noise band is not the run's to make;
+it goes to the planner, which chooses once from the records and writes
+the table, and the engine applies the table (VXPU_PLAN_TABLE) and writes
+goldens against it. The rest of hero 11 ran on such a table
+(`table-h11.json`, planned from both records without the launch credit:
+attn_out on the kernel, what 6430bba ran, checked against its record at
+all 347 sites), and the lowering's own tie-break grew a margin (the gemv
+workstream's change).
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
