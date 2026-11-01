@@ -1322,6 +1322,42 @@ its producer (284 launches; the GEMV workstream's), and the fork's
 per-layer glue the compiler emits around the gate and the indexer (197
 launches, 0.49 ms; the indexer's top-k is #484).
 
+**Hero run 11, closed (Nov 1, 23:30 UTC).** The acceptance's 11.5 ms is
+not met: one row 13.2 → 12.9 ms, measured in one session on pod D with
+both arms on the pinned site table (nine rows 21.1 / 16.9 / 34.1 →
+20.8 / 16.7 / 34.0; 33 rows 28.9 / 26.7 / 93.5 → 28.9 / 26.6 / 93.5).
+What the run bought is the instrument, and the instrument says why the
+bar was out of reach tonight.
+
+| item | result |
+|---|---|
+| the roofline ledger | every call site carries its bytes, floor and time in the record; `vxpu kernels check` ranks sites and templates against their floors and fails sites under a threshold without a recorded reason; a profile-to-site join checks that every op received the launches it declared (and found the router launching 39 times for 40 sites). One row: floors sum to 9.1 ms against 13.0 ms of GPU time, 70% |
+| the measuring step | `vxpu kernels measure` sweeps a template's knobs per shape class on the card and writes the table; the GEMV table for the RTX PRO 6000 (26 classes) is checked in; the expert kernels' sweep is in the same format |
+| the GEMV templates | already at 87% of the floor overall; the engine's hand-set tiles were the best of 34 to 254 candidates in every class but three; the dual SwiGLU GEMV went from 76% to 93% (two warps, K split 8, four stages), worth 0.2 ms a step at one and nine rows. The four narrow GEMVs stay at 53 to 62% by structure (32 to 80 programs on 188 SMs): a fusion across the ops that share an input, not a tile |
+| the fp4 expert kernels | 82% → gate/up 85% and down 80% of a read peak measured at 1,535 GB/s (the 1,460 copy figure undercounts reads by 5%); the win was loading the activation row once instead of staging a masked tile per pipeline stage; 108 tile sets found the defaults best otherwise; 90% needs one launch per layer (two launches cost 2.5 µs each in ramp and tail) |
+| the small-kernel tail | at the launch floor: 0.75 µs per dependent kernel in a graph, 1.47 if it touches a row, so 876 kernels cost 0.66 to 1.3 ms and take 1.48; the two folds that remove nodes do not pay (the stats-into-dots fold is bitwise identical and slower everywhere; the last-program-finishes fold ties at one row and loses from nine, the finish being serial over rows); the per-segment counter mechanism is kept, off |
+| the noise band | the lowering's per-run measured choice flipped attn_out's body on 1 µs of noise between two loads and changed the one-row tokens at position 26 (83 more kernels, a different rounding); the golden check caught it on the first merged load; the choice now needs a margin of max(3%, 2 µs), and hero 11's runs were pinned to one table |
+
+Tokens: identical between the arms at 33 rows; at one and nine rows
+the merged tree moves the same near-tie token at position 26 that the
+attn_out flip moved. The site tables agree at every site and the swept
+blocks are not the cause (the merged tree without them gives the same
+tokens and the same 1,383 kernels against the base's 1,375), so the
+change is the GEMV workstream's narrow K-split dispatch, a rounding-level
+change the reference check puts inside its class; the golden files are to
+be rewritten against the merged tree with that reason recorded, and
+position 26 of the first prompt is a known coin-flip token that any
+rounding change moves. Where the one-row step's remaining 3.5 ms is, from
+the ledger (measured): experts 0.77 (two launches a layer), the latency
+tail about 1.4 (fronts 1.07, attention select 0.48, recode 0.31, compiler
+glue 0.36), the four narrow GEMVs 0.5, attn_q and attn_out 0.5 at 75 and
+90%. The next steps follow from the table, in order of size: the recode
+written once by its producer and the fork's per-layer glue (fewer sites
+in the tail), one expert launch per layer, the fusion of the x-sharing
+narrow GEMVs. Process: the four workstreams ran in parallel with deadline
+reports and results read from the pods' files, and the run closed in
+seven hours.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
