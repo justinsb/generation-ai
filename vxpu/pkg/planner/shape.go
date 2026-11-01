@@ -111,9 +111,18 @@ type ShapeCandidate struct {
 	Distinct     float64            `json:"distinct_experts"`
 	LatencyMs    float64            `json:"latency_ms"`
 	AggregateTS  float64            `json:"aggregate_tok_s"` // for the rows asked for, not the padded width
-	Fits         bool               `json:"fits"`
+	Fits         bool               `json:"fits"`            // within the latency budget and the kernels' row limit
+	Runnable     bool               `json:"runnable"`        // no wider than the kernels' row limit
 	Prediction   PipelinePrediction `json:"prediction"`
 }
+
+// MaxBatchRows is the widest batch the kernel library runs as planned:
+// the one-pass GEMV kernels and the fused bodies apply to at most this
+// many rows (VXPU_GEMV_ROWS_MAX), and above it the lowering falls back to
+// reference bodies that the cost model does not describe (hero run 10
+// measured 209 ms at 66 rows against the model's 104). A wider batch is
+// not a candidate until a GEMM template exists.
+const MaxBatchRows = 64
 
 // ShapeChoice is the planner's pick and the candidates it was picked from.
 type ShapeChoice struct {
@@ -127,14 +136,18 @@ type ShapeChoice struct {
 // ChooseShape lays rows out as 1..maxBatches batches in flight over plan
 // p (rows split evenly, the prediction at the widest batch), predicts each
 // with the pipeline model, drops the layouts whose per-batch latency is
-// over latencyMs (0: no budget) and returns the highest aggregate among
-// the rest; when nothing fits, the lowest latency, marked so.
-func ChooseShape(lb LayerBytes, p *kernelplan.PipelinePlan, rows, maxBatches int, latencyMs float64, dc DistinctCurve, drafter bool, c PipelineCost) (ShapeChoice, error) {
+// over latencyMs (0: no budget) or whose batch is wider than maxRows (0:
+// MaxBatchRows) and returns the highest aggregate among the rest; when
+// nothing fits, the lowest latency among the runnable layouts, marked so.
+func ChooseShape(lb LayerBytes, p *kernelplan.PipelinePlan, rows, maxBatches int, latencyMs float64, dc DistinctCurve, drafter bool, c PipelineCost, maxRows int) (ShapeChoice, error) {
 	if rows < 1 {
 		return ShapeChoice{}, fmt.Errorf("choose shape: rows %d: want at least 1", rows)
 	}
 	if maxBatches < 1 {
 		maxBatches = len(p.Ranges)
+	}
+	if maxRows < 1 {
+		maxRows = MaxBatchRows
 	}
 	choice := ShapeChoice{Rows: rows, LatencyMs: latencyMs}
 	for n := 1; n <= maxBatches && n <= rows; n++ {
@@ -148,7 +161,8 @@ func ChooseShape(lb LayerBytes, p *kernelplan.PipelinePlan, rows, maxBatches int
 		}
 		cand := ShapeCandidate{Batches: n, RowsPerBatch: per, Distinct: w.DistinctExperts, LatencyMs: pr.LatencyMs,
 			AggregateTS: pr.AggregateTokS * float64(rows) / float64(n*per), Prediction: pr}
-		cand.Fits = latencyMs <= 0 || pr.LatencyMs <= latencyMs
+		cand.Runnable = per <= maxRows
+		cand.Fits = cand.Runnable && (latencyMs <= 0 || pr.LatencyMs <= latencyMs)
 		choice.Candidates = append(choice.Candidates, cand)
 	}
 	best := -1
@@ -162,11 +176,19 @@ func ChooseShape(lb LayerBytes, p *kernelplan.PipelinePlan, rows, maxBatches int
 	}
 	if best < 0 {
 		for i, cand := range choice.Candidates {
-			if best < 0 || cand.LatencyMs < choice.Candidates[best].LatencyMs {
+			if !cand.Runnable && best >= 0 && choice.Candidates[best].Runnable {
+				continue
+			}
+			if best < 0 || (cand.Runnable && !choice.Candidates[best].Runnable) || cand.LatencyMs < choice.Candidates[best].LatencyMs {
 				best = i
 			}
 		}
 		choice.Chosen = choice.Candidates[best]
+		if !choice.Chosen.Runnable {
+			choice.Why = fmt.Sprintf("no layout of %d rows over %d batches keeps a batch within the kernels' %d-row limit: the narrowest is %d batches of %d rows",
+				rows, maxBatches, maxRows, choice.Chosen.Batches, choice.Chosen.RowsPerBatch)
+			return choice, nil
+		}
 		choice.Why = fmt.Sprintf("no layout of %d rows meets %.0f ms: the lowest latency is %d batches of %d rows at %.1f ms, %.0f tok/s",
 			rows, latencyMs, choice.Chosen.Batches, choice.Chosen.RowsPerBatch, choice.Chosen.LatencyMs, choice.Chosen.AggregateTS)
 		return choice, nil
@@ -180,6 +202,8 @@ func ChooseShape(lb LayerBytes, p *kernelplan.PipelinePlan, rows, maxBatches int
 		fit := "over the budget"
 		if cand.Fits {
 			fit = "fits"
+		} else if !cand.Runnable {
+			fit = fmt.Sprintf("wider than the kernels' %d-row limit", maxRows)
 		}
 		others = append(others, fmt.Sprintf("%d×%d %.0f tok/s at %.1f ms (%s)", cand.Batches, cand.RowsPerBatch, cand.AggregateTS, cand.LatencyMs, fit))
 	}

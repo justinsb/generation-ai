@@ -65,7 +65,7 @@ func TestChooseShape_WideBatchAgainstBatchesInFlight(t *testing.T) {
 	lb := deepseekLayers(t)
 	p := hero8Plan(t, 4)
 	cycled := DistinctCurve{Points: []DistinctPoint{{33, 100}, {132, 100}}, TopK: 6, Experts: 384}
-	choice, err := ChooseShape(lb, p, 132, 4, 0, cycled, false, RTXPro6000)
+	choice, err := ChooseShape(lb, p, 132, 4, 0, cycled, false, RTXPro6000, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,33 +74,46 @@ func TestChooseShape_WideBatchAgainstBatchesInFlight(t *testing.T) {
 		t.Errorf("132 rows, no budget: chose %d×%d from %d candidates, want three or four batches in flight", choice.Chosen.Batches, choice.Chosen.RowsPerBatch, len(choice.Candidates))
 	}
 	wide := choice.Candidates[0]
+	if wide.Runnable || wide.Fits || !choice.Candidates[3].Runnable {
+		t.Errorf("132 rows in one batch is wider than the kernels' %d-row limit and must not be a candidate that fits: %+v", MaxBatchRows, wide)
+	}
 	if wide.Batches != 1 || wide.AggregateTS > choice.Chosen.AggregateTS*0.8 || wide.LatencyMs < choice.Chosen.LatencyMs {
 		t.Errorf("the wide batch: %.0f tok/s at %.1f ms against %.0f at %.1f", wide.AggregateTS, wide.LatencyMs, choice.Chosen.AggregateTS, choice.Chosen.LatencyMs)
 	}
 	// the budget: the batches in flight take 96 to 110 ms a batch step in the model; under 80 ms nothing with 132 rows fits
-	if c, _ := ChooseShape(lb, p, 132, 4, 110, cycled, false, RTXPro6000); c.Chosen.Batches < 3 || !c.Chosen.Fits {
+	if c, _ := ChooseShape(lb, p, 132, 4, 110, cycled, false, RTXPro6000, 0); c.Chosen.Batches < 3 || !c.Chosen.Fits {
 		t.Errorf("110 ms budget: chose %d×%d fits=%v", c.Chosen.Batches, c.Chosen.RowsPerBatch, c.Chosen.Fits)
 	}
-	if c, _ := ChooseShape(lb, p, 132, 4, 80, cycled, false, RTXPro6000); c.Chosen.Fits {
+	if c, _ := ChooseShape(lb, p, 132, 4, 80, cycled, false, RTXPro6000, 0); c.Chosen.Fits {
 		t.Errorf("80 ms budget: %s", c.Why)
 	} else {
 		t.Log(c.Why)
 	}
 	// a prompt per row: more distinct experts at every width, the wide batch loses by more
-	perRow, _ := ChooseShape(lb, p, 132, 4, 0, hero9Curve(), false, RTXPro6000)
+	perRow, _ := ChooseShape(lb, p, 132, 4, 0, hero9Curve(), false, RTXPro6000, 0)
 	t.Log(perRow.Why)
 	if perRow.Chosen.Batches != 4 || perRow.Candidates[0].AggregateTS > wide.AggregateTS {
 		t.Errorf("a prompt per row: chose %d batches; the wide batch %.0f tok/s against %.0f cycled", perRow.Chosen.Batches, perRow.Candidates[0].AggregateTS, wide.AggregateTS)
 	}
 	// one row is one batch
-	if c, _ := ChooseShape(lb, p, 1, 4, 0, hero9Curve(), false, RTXPro6000); c.Chosen.Batches != 1 || len(c.Candidates) != 1 {
+	if c, _ := ChooseShape(lb, p, 1, 4, 0, hero9Curve(), false, RTXPro6000, 0); c.Chosen.Batches != 1 || len(c.Candidates) != 1 {
 		t.Errorf("one row: %s", c.Why)
 	}
+	// 300 rows over four batches: every layout is wider than 64 rows; the planner says so instead of predicting one
+	if c, _ := ChooseShape(lb, p, 300, 4, 0, hero9Curve(), false, RTXPro6000, 0); c.Chosen.Fits || c.Chosen.Runnable {
+		t.Errorf("300 rows: %s", c.Why)
+	} else {
+		t.Log(c.Why)
+	}
+	// with the limit lifted (a GEMM template for wide rows) the wide batch is a candidate again, and still loses
+	if c, _ := ChooseShape(lb, p, 132, 4, 0, cycled, false, RTXPro6000, 1<<20); !c.Candidates[0].Runnable || c.Chosen.Batches < 3 {
+		t.Errorf("no row limit: %s", c.Why)
+	}
 	// nine rows under a 20 ms budget: nothing fits with a prompt per row; with the same prompt in every row, three batches of 3 do
-	if c, _ := ChooseShape(lb, p, 9, 4, 20, hero9Curve(), false, RTXPro6000); c.Chosen.Fits {
+	if c, _ := ChooseShape(lb, p, 9, 4, 20, hero9Curve(), false, RTXPro6000, 0); c.Chosen.Fits {
 		t.Errorf("9 different rows in 20 ms: %s", c.Why)
 	}
-	if c, _ := ChooseShape(lb, p, 9, 4, 20, DistinctCurve{TopK: 6, Experts: 384}, false, RTXPro6000); !c.Chosen.Fits {
+	if c, _ := ChooseShape(lb, p, 9, 4, 20, DistinctCurve{TopK: 6, Experts: 384}, false, RTXPro6000, 0); !c.Chosen.Fits {
 		t.Errorf("9 same rows in 20 ms: %s", c.Why)
 	} else {
 		t.Log(c.Why)

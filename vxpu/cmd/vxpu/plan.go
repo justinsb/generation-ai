@@ -51,6 +51,7 @@ func runPlanPipeline(ctx context.Context, args []string) error {
 	distinct := flags.Float64("distinct", 0, "distinct experts a layer the batch selects (default: top-k, the same prompt in every row)")
 	distinctAt := flags.String("distinct-at", "", "measured distinct experts a layer by batch width, ROWS=COUNT,...: the curve --batches 0 estimates each candidate's count from (default: --distinct at every width)")
 	latency := flags.Float64("latency-ms", 0, "with --batches 0, the per-batch step the chosen shape must stay under (0: no budget)")
+	maxRows := flags.Int("max-batch-rows", planner.MaxBatchRows, "with --batches 0, the widest batch the kernels run as planned (the one-pass kernels' row limit)")
 	drafter := flags.Bool("drafter", false, "the step verifies the drafter's tokens (its stages and dense weights run on the last range)")
 	cutsSpec := flags.String("cuts", "", "layers a range may start at, comma-separated (default: any), for --balance")
 	balance := flags.Bool("balance", false, "look for ranges with a shorter slowest range within --budget-gb a GPU")
@@ -115,7 +116,7 @@ func runPlanPipeline(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		c, err := planner.ChooseShape(lb, plan, *rows, len(plan.Ranges), *latency, curve, *drafter, cost)
+		c, err := planner.ChooseShape(lb, plan, *rows, len(plan.Ranges), *latency, curve, *drafter, cost, *maxRows)
 		if err != nil {
 			return err
 		}
@@ -160,7 +161,9 @@ func runPlanPipeline(ctx context.Context, args []string) error {
 			fmt.Println("shape: " + choice.Why)
 			for _, cand := range choice.Candidates {
 				fits := "fits"
-				if !cand.Fits {
+				if !cand.Runnable {
+					fits = "wider than the kernels' row limit"
+				} else if !cand.Fits {
 					fits = "over the budget"
 				}
 				fmt.Printf("  %d batches of %3d rows: %5.0f tok/s, a batch step every %5.1f ms, latency %5.1f ms, %3.0f distinct experts a layer (%s)\n",
