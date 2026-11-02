@@ -276,6 +276,17 @@ def _check_flat(inputs, out, what):
                                f"(shape {tuple(t.shape)}, stride {t.stride()}); the loop copies it flat")
 
 
+def compressed_cache(name, state):
+    """Whether a shared cache is written by a running compressor (a KV group whose source layer
+    keeps compressor state: layers 2, 8 and 14 of DeepSeek-V4.1-Flash): its slots are compressed
+    positions, so the step's window at the token positions is not what the step wrote. Layer
+    20's group has no compressor and its cache takes the window (hero run 9, verified token for
+    token); layer 8's replicated across a cut at layer 9 took the window too and decoded 28 of
+    33 rows wrong (hero run 12), and is refreshed whole."""
+    prefix = name.rsplit(".attn.", 1)[0] if ".attn." in name else None
+    return prefix is not None and f"{prefix}.attn.compressor.kv_state" in state
+
+
 def positional_cache(src, rows, toks, min_positions=64):
     """Whether a shared state tensor is a cache indexed [row, position, ...] whose replica the
     step may refresh by the window it wrote (CACHE_WINDOWS): its first dim is the rows, its
@@ -791,6 +802,8 @@ class StepGraph(torch.nn.Module):
                 src = dataflow._attr(self.split, name)
                 if not (isinstance(src, torch.Tensor) and positional_cache(src, rows_n, toks) and replica.shape == src.shape):
                     continue
+                if compressed_cache(name, self.runner.state):
+                    continue  # written at compressed slots, not at the step's positions: refreshed whole
                 owner = node_dev[writers[name]]
                 if owner == d2 or src.device != owner:
                     continue
