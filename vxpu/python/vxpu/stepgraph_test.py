@@ -50,5 +50,21 @@ class BranchChoiceTest(unittest.TestCase):
         self.assertFalse(on_par)
 
 
+
+
+class PositionalCacheTest(unittest.TestCase):
+    """The window refresh applies to [rows, positions, ...] caches, not to a small running state."""
+
+    def test_caches_and_states(self):
+        import torch
+        from vxpu.stepgraph import positional_cache
+        self.assertTrue(positional_cache(torch.empty(33, 2048, 512), 33, 1))
+        self.assertTrue(positional_cache(torch.empty(33, 128, 512), 33, 5))
+        self.assertFalse(positional_cache(torch.empty(33, 2, 512), 33, 1), "a compressor's two-slot state")
+        self.assertFalse(positional_cache(torch.empty(9, 2048, 512), 33, 1), "another batch's rows")
+        self.assertFalse(positional_cache(torch.empty(33, 4), 33, 1), "no position axis")
+        self.assertFalse(positional_cache(torch.empty(33, 5, 512), 33, 5), "no room past the step's tokens")
+
+
 if __name__ == "__main__":
     unittest.main()
