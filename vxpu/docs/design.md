@@ -1400,6 +1400,56 @@ site table on both arms:
 Deadlines: interim reports with numbers at 02:00 and 05:00 UTC, final by
 07:00 UTC; results read from the pods' files.
 
+**Hero run 12, the wide-row GEMM (Nov 2, 00:00 to 00:45 UTC; measured on
+pod A, one RTX PRO 6000 node, four GPUs sharded, one batch, pinned site
+table on the tiled arm, 64 new tokens, median step).** The cliff at 64
+rows is gone. The three GEMV kernels (gemv_rows, the dual SwiGLU GEMV,
+gemv_pe) run tiled over rows past GEMV_ROWS_MAX: a program owns one row
+tile of at most 64 rows, the grid's first and fastest axis is the row
+tile, so the programs that share a weight tile launch together and the
+weight comes from DRAM about once (the next row tile's pass finds it in
+L2). The one-pass launch is the same launch as before; the Triton bodies
+in ops.py apply up to 1,024 rows (TRITON_MAX_ROWS) and the fused bodies
+keep the GEMV's limit; the shape class names its tiles ("tiles=3") so the
+table and the measuring step see the wide classes apart. At the real
+shapes every tiled result is bit-identical to the one-pass kernel run
+tile by tile (plain, narrow split, grouped with the quant epilogue, the
+shared expert's two kernels, attn_q's pair) and within 2.5e-3 of
+torch.matmul over the dequantized weight.
+
+| rows a batch | prompts | tiled kernels: step ms (tok/s) | reference path, same tree: step ms (tok/s) | hero 10's reference path |
+|---|---|---|---|---|
+| 33 | one / cycled list | 29.0 / 92.3 | unchanged (one pass) | 95.3 |
+| 66 | one / cycled list / 66 different | 45.3 (1,457) / 106.9 (617) / 110.4 (598) | 143.7 / 204.3 / 212.0 | 209 / 213 |
+| 99 | one / cycled / 99 different | 60.8 (1,628) / 117.2 (845) / 135.4 (731) | not run | 230 / 240 |
+| 132 | one / cycled / 132 different | 79.3 (1,665) / 143.5 (920) / 171.8 (768) | 195.2 / 245.2 / 284.2 | 297 / 286 |
+
+Kernels a step: 1,660 at 132 rows against 14,449 on the reference path.
+Tokens: every row identical to the others with one prompt at 66, 99 and
+132 rows, and every duplicate-prompt row pair identical with the cycled
+list (34 of 34, 67 of 67, 100 of 100 pairs; the pairs straddle row 64).
+Against the model's slope: 132 rows of the cycled list at 143.5 ms is
+under the 160 the 0.6 ms-a-row slope predicted; the slope with one
+distinct prompt is 0.50 ms a row from 33 to 132, and with a prompt per
+row 0.80 (the distinct experts grow with the rows). The reference
+check's flags on the router and the attention select at 66 and 99 rows
+were tested per row: the split front body is bit-identical whether run
+on 132 rows or on 33-row slices, 0 of 132 rows differ from the reference
+in the top-k set or the weights on real-shape inputs, and the duplicate
+pairs across row 64 agree on the real model; the flags are the
+statistic's maximum over every row of the tensor, the rows no request
+owns included, and top-k indices that flip where two scores are within
+rounding of each other (a self-tests item: live rows only, tie-aware
+integer comparison). What the wide step costs, from the record at 132
+rows of one prompt: the attention select's cache reads are the largest
+byte item (17.5 GB a step, floor 11.6 ms, more than the dense weights'
+8.5 GB), the router's split kernels 5.3 ms (132 µs a layer, linear in
+rows) and hc_front 2.2, the engram linear at 39% of its floor (166 MB, a
+weight the L2 does not hold across row tiles). The GEMM template proper,
+with 128-row tiles for the tensor cores' sake, is the next step for the
+weights above the L2 and for rows past about 200; the planner's wide
+classes now have numbers to choose by.
+
 **Direction: the planner chooses the kernels, in Go (hero run 8).** Today
 two planners exist and the split is the wrong one. The coordinator's
 planner (Go) decides placement, which machines and GPUs run which layers
