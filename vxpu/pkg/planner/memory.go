@@ -45,9 +45,13 @@ type MemoryCost struct {
 	// after the first carries the reference bodies' bf16 copies of the range's
 	// fp8 dense weights (two bytes per fp8 byte), until the GEMM template exists.
 	ReferenceDenseFactor float64
-	// DrafterPerRowLayerMB is what the drafter's graph adds per row and layer
-	// of the range for a batch that drafts (0 until measured).
+	// DrafterPerRowLayerMB is what a drafting batch's verify step (five token
+	// rows a row) adds per row and layer of the range beyond a plain batch;
+	// DrafterFixedLastGB is what the drafter's own stages and graphs add on
+	// the last range whatever the rows (beyond their experts, which the
+	// drafter artifact's inventory counts with the layers).
 	DrafterPerRowLayerMB float64
+	DrafterFixedLastGB   float64
 	// HostMsPerExpert is one expert read through the host path in a step
 	// (measured Oct 29 2026 on a g4-standard-192: every expert on the CPU
 	// cost 39.7 ms a token against 24.2 with all on the GPUs, 240 reads).
@@ -71,7 +75,8 @@ var RTXPro6000Memory = MemoryCost{
 	PerRowLayerMB:        3.0,
 	ReplicaMBPerRow:      2.6,
 	ReferenceDenseFactor: 2.0,
-	DrafterPerRowLayerMB: 0,
+	DrafterPerRowLayerMB: 4.3,  // one batch of 33 rows with the drafter: GPU 1 94.8 GB against 93.1 plain (Nov 2)
+	DrafterFixedLastGB:   11.0, // the same run: GPU 3 84.8 against 66.0, less the drafter stages' 7.2 GB of experts and the per-row term
 	HostMsPerExpert:      0.065,
 }
 
@@ -181,6 +186,9 @@ func PredictMemory(lb LayerBytes, p *kernelplan.PipelinePlan, w Workload, res Re
 		}
 		if w.Drafter {
 			g.DrafterGB = float64(w.Batches) * rows * float64(layers) * mc.DrafterPerRowLayerMB / 1e3
+			if i == last {
+				g.DrafterGB += mc.DrafterFixedLastGB
+			}
 		}
 		g.TotalGB = g.DenseGB + g.ExpertsGB + g.FixedGB + g.BatchesGB + g.ReferenceGB + g.ReplicaGB + g.DrafterGB
 		g.Fits = g.TotalGB <= budget

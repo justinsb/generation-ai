@@ -33,7 +33,7 @@ func memoryFixture() (LayerBytes, *kernelplan.PipelinePlan, MemoryCost) {
 	p := &kernelplan.PipelinePlan{Format: kernelplan.PlanFormat, Ranges: []kernelplan.Range{{GPU: 0, Layers: "0:2"}, {GPU: 1, Layers: "2:4"}},
 		Pipeline: kernelplan.Pipeline{Batches: 1, Schedule: kernelplan.ScheduleRangeOrder}}
 	mc := MemoryCost{TotalGB: 10, HeadroomGB: 1, FixedFirstGB: 1, FixedMiddleGB: 0.5, FixedLastGB: 0.75, PerRowLayerMB: 10,
-		ReplicaMBPerRow: 5, ReferenceDenseFactor: 2, HostMsPerExpert: 0.1}
+		ReplicaMBPerRow: 5, ReferenceDenseFactor: 2, DrafterPerRowLayerMB: 20, DrafterFixedLastGB: 1, HostMsPerExpert: 0.1}
 	return lb, p, mc
 }
 
@@ -114,6 +114,14 @@ func TestPredictMemory_ReplicasAndReferenceBodies(t *testing.T) {
 	}
 	if m.GPUs[0].ReferenceGB != 0 {
 		t.Fatalf("under a 128-row limit the reference term should be zero: %+v", m.GPUs[0])
+	}
+	// the drafter: 20 MB a row and layer on every range, plus 1 GB of stages and graphs on the last
+	m, err = PredictMemory(lb, p, Workload{Rows: 10, Batches: 2, Drafter: true}, nil, 64, mc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(m.GPUs[0].DrafterGB, 0.8) || !near(m.GPUs[1].DrafterGB, 1.8) {
+		t.Fatalf("drafter: %+v %+v", m.GPUs[0], m.GPUs[1])
 	}
 }
 
