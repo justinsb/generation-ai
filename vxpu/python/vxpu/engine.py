@@ -1565,7 +1565,8 @@ class Engine:
                                            adaptive=adaptive, window=window, seen_acc=seen_acc, depth0=depth,
                                            flat_sizes=flat_sizes, fill=policy.fill if flat else None,
                                            slots=flat and policy.policy == speculation.SLOTS,
-                                           cost_model=flat and policy.cost_model)
+                                           cost_model=flat and policy.cost_model,
+                                           request=flat and policy.policy == speculation.REQUEST)
                         break
                     if fixed and logits_sink is None and self._tp_spec_fixed_ready(S):
                         # the fixed shape: from here the drafter's and the verify's graphs chain on the stream and the
@@ -1980,7 +1981,7 @@ class Engine:
     def _tp_spec_half(self, R, n_rows, S, first, pos, tokens, done, max_new_tokens, max_draft, min_conf, block, scale,
                       lengths, budget, cost_rows, cost_draft, chosen_depths, out, account, dump=None,
                       adaptive=False, window=0, seen_acc=None, depth0=None, flat_sizes=(), fill=None, slots=False,
-                      cost_model=False):
+                      cost_model=False, request=False):
         """The drafted step in its half-fixed shape (hero run 15): the verify's per-length program is still chosen on
         the host from the drafter's confidences (the confidence floor or the budget policy), but the step's acceptance
         runs on rank 0's device as in the fixed shape, the drafter's and the verify's input buffers are written on the
@@ -2029,6 +2030,15 @@ class Engine:
 
         depth_box = [depth0 if depth0 is not None else max_draft]
         seen_acc = seen_acc if seen_acc is not None else []
+        # the per-request depth (vLLM's AcceptanceLengthController, hero run 15): each row's depth from its own accepted
+        # history, min(max_draft, floor(mean + 1.5)) over the last `window` steps, down at once and up by one a window,
+        # seeded at max_draft until the row has a window; it reads accepted counts only, so every rank of a
+        # process-per-rank world computes the same depths from the same tokens with no timing and no broadcast
+        import collections as _co
+        req_w = max(1, int(window or 16))
+        req_hist = [_co.deque(maxlen=req_w) for _ in range(R)]
+        req_depth = [max_draft] * R
+        req_since = [0] * R
 
         def flat_layout(issued, rows_out, live):
             return self._flat_layout(issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale,
@@ -2039,6 +2049,23 @@ class Engine:
             # the adaptive controller's depth (shared by the rows, moved by the accepted window after each step)
             if adaptive:
                 return [depth_box[0] if not done[i] else 0 for i in range(R)]
+            if request:
+                depths = []
+                for i in range(R):
+                    if done[i]:
+                        depths.append(0)
+                        continue
+                    h = req_hist[i]
+                    if len(h) >= req_w:
+                        target = min(max_draft, max(1, int(sum(h) / len(h) + 1.5)))
+                        if target < req_depth[i]:
+                            req_depth[i], req_since[i] = target, 0
+                        elif target > req_depth[i]:
+                            req_since[i] += 1
+                            if req_since[i] >= req_w:
+                                req_depth[i], req_since[i] = req_depth[i] + 1, 0
+                    depths.append(req_depth[i])
+                return depths
             if budget:
                 cands = [D for D in range(1, max_draft + 1) if (D + 1) in lengths]
                 untried = [D for D in cands if not cost_rows.get(D + 1)]
@@ -2120,6 +2147,7 @@ class Engine:
                         n += 1
                     out["drafted"] += issued[i]; out["accepted"] += n
                     account["issued"].append(issued[i]); account["accepted"].append(n)
+                    req_hist[i].append(n)
                     for tok in ids[i][1:n + 1] + [choices[i][n]]:
                         tokens[i].append(tok)
                         if tok in self.eos_ids or len(tokens[i]) >= max_new_tokens:

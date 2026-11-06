@@ -33,6 +33,7 @@ policy's precision are replaced by measurements."""
 import dataclasses
 
 FIXED, CONFIDENCE, EXPERTS, ADAPTIVE, BUDGET, SLOTS = "fixed", "confidence", "experts", "adaptive", "budget", "slots"
+REQUEST = "request"  # the per-request depth from each row's accepted history (vLLM's AcceptanceLengthController)
 # the drafter's confidence encodings (the binding's draft.confidence): the score's scale in the
 # drafter's int64 output (deepseek_v41.Draft: a sigmoid of the confidence head, times 1e6)
 CONFIDENCE_SCALES = {"sigmoid_x1e6": 1e6}
@@ -115,9 +116,11 @@ class Policy:
             raise ValueError(f"speculation policy {self.policy!r} needs the flat shape")
         if self.policy == ADAPTIVE and self.window < 1:
             raise ValueError(f"speculation policy {self.policy!r}: window {self.window}, want at least 1")
-        if self.policy not in (FIXED, CONFIDENCE, EXPERTS, ADAPTIVE, BUDGET, SLOTS):
+        if self.policy == REQUEST and self.shape != "flat":
+            raise ValueError("speculation policy request needs the flat shape (its per-row depths are laid out as token rows)")
+        if self.policy not in (FIXED, CONFIDENCE, EXPERTS, ADAPTIVE, BUDGET, SLOTS, REQUEST):
             raise ValueError(f"speculation policy {self.policy!r}: the engine knows {FIXED!r}, {CONFIDENCE!r}, {EXPERTS!r}, "
-                             f"{ADAPTIVE!r}, {BUDGET!r} and {SLOTS!r}")
+                             f"{ADAPTIVE!r}, {BUDGET!r}, {SLOTS!r} and {REQUEST!r}")
         return self
 
 
