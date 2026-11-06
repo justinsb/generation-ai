@@ -7659,3 +7659,12 @@ theirs at 16 slots code: reaching position 6 in 73 percent of stream-steps again
 percent in tokens a step, and that with their 12 fewer rows a step (about 116 against our 128 at 0.2 ms a row) is
 most of the league gap at 16 streams; their step and ours now cost the same per row (sums 79 us a site in both, the
 expert node at the same bytes).
+
+**Their drafter form, the attempt (Nov 6, 23:11 to 23:19 UTC).** The exporter's seven chained one-token passes
+(--draft-block 1 --draft-passes 7, their form: the stages' own states standing in for the target's between blocks)
+refused at the drafter's trace: "IndexError: index -1 is out of bounds for dimension 1 with size 0" (block 1 is an
+anchor plus zero noise positions; the drafter's code indexes the empty positions tensor at its last element), a code
+path for the one-token block, not fixed tonight: F101 not started. The two-anchor hedge (--draft-block 4
+--draft-passes 2, spec3t8-b4p2-tp4-b16) exported in 131 s and its first run died at the load in the dense option's
+autotune of a new shape on the main thread (128x1280 -> 1024) and, on another rank, in a package's zip extraction;
+F102b runs it without the dense option on F97's stack otherwise, text-gated against F97.
