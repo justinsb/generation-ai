@@ -1174,6 +1174,9 @@ class Engine:
         self._timing_graph = time.time() - t_start
         msg = (f"tensor parallelism: {self.tp} ranks on {[str(d) for d in self.world.devices]}, the dense weights "
                f"split {len(par['slices'])} ways by name; the prefill runs through the decode step a token at a time")
+        if self.world.multiproc:
+            from . import multiproc
+            msg += f"; a process per rank, the step's sums {multiproc.SUMS} (VXPU_MP_SUMS)"
         print(f"[vxpu] {msg}", flush=True)
         self.plan.note(msg)
 
@@ -1311,9 +1314,16 @@ class Engine:
             sites = max([sum(1 for n in g.runner.graph.nodes if n.kind == "allreduce")
                          for g in programs if isinstance(g, StepGraph)] + [1])
             rows_max = max(list(self._tp_decodes) + [self.step_tokens])
-            if not self.world.multiproc:  # a process per rank sums over NCCL: no inboxes on the peers' cards
+            from . import multiproc
+            if not self.world.multiproc:
                 ar.setup(self.world.devices, sites, max(B * rows_max, max(self._tp_flat, default=0)) * margs.dim,
                          dtypes=[torch.bfloat16, torch.float32], hcs=[margs.hc_mult])
+            elif multiproc.push_sums():
+                # a process per rank with our sum forms (hero run 16): this card's arena, the peers' opened over
+                # CUDA IPC (a rendezvous of every process, before any capture); under NCCL sums no Comm at all
+                from . import ipc
+                ar.setup(multiproc.all_devices(), sites, max(B * rows_max, max(self._tp_flat, default=0)) * margs.dim,
+                         dtypes=[torch.bfloat16, torch.float32], hcs=[margs.hc_mult], local=multiproc.rank(), share=ipc.share)
         self.world.solo = True
         try:
             with self.external_scope():
@@ -1376,10 +1386,18 @@ class Engine:
                 # nobody consumed, and the warm-up ring writes were zeroed behind no-op barriers; a stale
                 # round-0 flag puts a card a round ahead of its peer in the first real step (the stop with
                 # one rank's pushes missing on every peer, hero run 15)
-                from . import allreduce as ar
+                from . import allreduce as ar, multiproc
+                if self.world.multiproc and multiproc.push_sums():
+                    # the processes primed at the same time, each pushing into the others' mapped inboxes: every
+                    # rank finishes its prime before any resets, and every rank resets before any steps
+                    from . import ipc
+                    ipc.barrier("primed")
                 if ar.comm() is not None:
                     ar.comm().reset()
                 self.world.reset_rings()
+                if self.world.multiproc and multiproc.push_sums():
+                    from . import ipc
+                    ipc.barrier("reset")
         finally:
             self.world.solo = False
         # the prime's solo programs leave compiled kernels to be collected; left to the collector, their

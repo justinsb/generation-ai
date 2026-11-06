@@ -86,11 +86,13 @@ class World:
         self._shared = {}  # share(): what every rank holds for a key, in rank order
 
     def reset_rings(self):
-        """Every ring write's flag and counter back to zero (after steps nobody consumed: the prime)."""
+        """Every ring write's flag and counter back to zero (after steps nobody consumed: the prime); a
+        process per rank zeroes its own card's words (the peers' are theirs to reset)."""
         for d in (self.flags, self.counters):
             for pairs in d.values():
                 for t in pairs.values():
-                    t.zero_()
+                    if t is not None and t.device in self.devices:
+                        t.zero_()
         for dev in self.devices:
             if dev.type == "cuda":
                 torch.cuda.synchronize(dev)
@@ -292,12 +294,44 @@ class World:
         bit-identical."""
         with self._lock:
             if k not in self.inboxes:
+                if self.multiproc:
+                    self._shared_buffers(k, like)
+                    return self.inboxes[k], self.flags[k], self.counters[k]
                 pairs = [(i, j) for i in range(self.size) for j in range(self.size) if i != j]
                 self.inboxes[k] = {(i, j): torch.zeros(like.shape, dtype=like.dtype, device=self.devices[j])
                                    for i, j in pairs}
                 self.flags[k] = {(i, j): torch.zeros(1, dtype=torch.int32, device=self.devices[j]) for i, j in pairs}
                 self.counters[k] = {(i, j): torch.zeros(1, dtype=torch.int32, device=self.devices[i]) for i, j in pairs}
             return self.inboxes[k], self.flags[k], self.counters[k]
+
+    def _shared_buffers(self, k, like):
+        """The exchange buffers of collective k across processes (hero run 16): this rank allocates one
+        arena on its card holding, per source rank, its inbox for that source and the flag that source
+        raises, and per destination rank the counter of its own ring write to it; the arenas are
+        exported and the peers' opened through CUDA IPC (ipc.share: a rendezvous every rank reaches in
+        the same order, before any capture). The dicts hold every pair, as the one-process world's do
+        (the embedding's push form writes into a fixed source's inbox on every card); reset_rings zeroes
+        this card's words alone."""
+        from . import ipc
+        size, peers = self.size, max(self.size - 1, 1)
+        align = 256
+        payload = like.numel() * like.element_size()
+        nbytes = -(-payload // align) * align
+        arena = torch.zeros(peers * (nbytes + 2 * align), dtype=torch.uint8, device=self.devices[0])
+        arenas = ipc.share(ipc.key_name("world", k), arena)
+
+        def slot(src, dst):  # the peers of dst in rank order
+            return src if src < dst else src - 1
+        inboxes, flags, counters = {}, {}, {}
+        for j in range(size):
+            a = arenas[j]
+            for i in range(size):
+                if i == j:
+                    continue
+                inboxes[(i, j)] = a[slot(i, j) * nbytes:][:payload].view(like.dtype).view(like.shape)  # i's partial, on j
+                flags[(i, j)] = a[peers * nbytes + slot(i, j) * align:][:4].view(torch.int32)  # raised by i, on j
+                counters[(j, i)] = a[peers * (nbytes + align) + slot(i, j) * align:][:4].view(torch.int32)  # j's write to i, on j
+        self.inboxes[k], self.flags[k], self.counters[k] = inboxes, flags, counters
 
 
 class _nullcontext:
