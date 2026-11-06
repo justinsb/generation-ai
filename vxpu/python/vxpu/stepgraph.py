@@ -284,6 +284,49 @@ def choose(logits, temperature, top_k, top_p):
     return torch.where((temperature > 0).view(-1, 1), sampled, greedy)
 
 
+_EXPERT_FORM_SAID = set()
+
+
+def _expert_form_line(x_, i_, per_pair, dev):
+    """The expert kernel form the direct path takes for this node, decided from the same inputs its
+    chooser reads (triton_ops.fp4_experts_decode and _fp4_experts_direct: the knobs, the rows, the pairs,
+    whether the replies are summed in the kernel), printed once per device and form at the step's
+    build. The proof that a knob arm ran, in the load log, without a line in triton_ops (whose source
+    is in the package digest, so a print there would rebuild every package)."""
+    tk = triton_ops
+    n, topk = i_.shape
+    pairs = n * topk
+    try:
+        from . import b12x_experts
+        b12x = b12x_experts.on()
+    except ImportError:
+        b12x = False
+    one_launch = tk._fp4_one_launch_on()
+    direct = pairs <= tk.FP4_DIRECT_MAX if tk.FP4_DIRECT is None else tk.FP4_DIRECT == "1"
+    compact = tk.FP4_DIRECT_COMPACT in ("1", 1, True) and not one_launch
+    group = compact and tk.FP4_DIRECT_GROUP in ("1", 1, True) and not per_pair and n > 1
+    first = compact and not group and tk.FP4_DIRECT_FIRST in ("1", 1, True) and not per_pair and 1 < n <= 16
+    if b12x:
+        form = "b12x (their W4A8 kernel)"
+    elif not direct:
+        form = "gemm or grouped-many (above FP4_DIRECT_MAX)"
+    elif one_launch:
+        form = "one-launch"
+    elif group:
+        form = "grouped"
+    elif first:
+        form = (f"first-pair (gate/up per distinct expert; down {'first-pair' if tk.FP4_FIRST_DOWN in ('1', 1, True) else 'direct'}, "
+                f"tile body {'gather' if int(tk.FP4_FIRST_MT) == 0 else f'per-slot up to {tk.FP4_FIRST_MT} rows'})")
+    else:
+        form = "direct (one program a pair)"
+    key = (str(dev), form, n)
+    if key in _EXPERT_FORM_SAID:
+        return
+    _EXPERT_FORM_SAID.add(key)
+    print(f"[vxpu] experts: {form} form on {dev}: rows {n}, pairs {pairs}, per_pair {per_pair}, FP4_DIRECT_MAX {tk.FP4_DIRECT_MAX}, "
+          f"FP4_DIRECT_FIRST {tk.FP4_DIRECT_FIRST}, FP4_PDL {tk.FP4_PDL}, GU_BK {tk.FP4_GU_BK}", flush=True)
+
+
 def _covers(partial, moe, here, peer_boxes):
     """Whether the node's pairs never need the host: every expert of the layer is in a GPU pool, or the
     plan's expert_ep says this GPU answers for its held pairs alone and the step's reduce adds the
@@ -1732,6 +1775,7 @@ class StepGraph(torch.nn.Module):
             side.wait_stream(stream)
             with torch.cuda.stream(side):
                 for pool in here:
+                    _expert_form_line(x_, i_, not summed, pool.device)
                     hot.append((pool, triton_ops.fp4_experts_decode(
                         x_, w_, pool.slot_gpu, pool.w1, pool.s1, pool.w3, pool.s3, pool.w2, pool.s2,
                         moe.swiglu_limit, per_pair=not summed, indices=i_, start=moe.experts_start_idx,

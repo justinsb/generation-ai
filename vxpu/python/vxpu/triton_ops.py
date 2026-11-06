@@ -3830,7 +3830,7 @@ if triton is not None:
                                 PP: tl.constexpr = 8, GROUP: tl.constexpr = False, GMT: tl.constexpr = 4,
                                 TWO: tl.constexpr = False, pd0=None, pd1=None, pd2=None, pcnt_ptr=None, pf0=None, pf1=None,
                                 pf2=None, NSUM=0, PEERS_OUT: tl.constexpr = 0, FIRST: tl.constexpr = False,
-                                FMT: tl.constexpr = 0):
+                                FMT: tl.constexpr = 0, PAIR2: tl.constexpr = False):
         """The down projection, one program per (pair, row tile): _fp4_direct_down_one. As a
         dependent launch (PDL) the program waits before anything else: for the whole gate/up grid
         and its stores (gdc_wait), or with WAIT for its own pair's NEED gate/up programs on the
@@ -3870,7 +3870,47 @@ if triton is not None:
                     else:
                         _gdc_wait()
                 fi_lo = fks2 * (I // KS2)
-                if fcount == 1:  # one pair: the direct kernel's own program
+                if PAIR2 and fcount == 1:
+                    # a singleton expert: paired with the next singleton first pair, two a program (the direct down
+                    # kernel's form); the rank among the singleton first pairs from a [PP, PP] compare of the pair list
+                    # (a [PP, PP] compare crashed Triton's layout pass; PP vector passes instead, PP is at most 64)
+                    fcnt_j = tl.zeros((PP,), dtype=tl.int32)
+                    fbefore_j = tl.zeros((PP,), dtype=tl.int32)
+                    for fi in tl.static_range(PP):
+                        fe_i = tl.load(idx_ptr + fi, mask=fi < fP, other=-2)
+                        fsl_i = tl.load(map_ptr + fe_i - start, mask=fi < fP, other=-1)
+                        fsame = fheld & (fsl_i >= 0) & (fe == fe_i)
+                        fcnt_j += fsame.to(tl.int32)
+                        fbefore_j += (fsame & (fjj > fi)).to(tl.int32)
+                    fsf = fheld & (fbefore_j == 0) & (fcnt_j == 1)
+                    frank2 = tl.sum((fsf & (fjj < fq)).to(tl.int32), 0)
+                    if frank2 % 2 == 0:
+                        fafter = fsf & (fjj > fq)
+                        fcum = tl.cumsum(fafter.to(tl.int32), 0)
+                        fvalid_b = tl.sum(fafter.to(tl.int32), 0) > 0
+                        fpb = tl.sum(tl.where(fafter & (fcum == 1), fjj, 0), 0)
+                        fpb = tl.where(fvalid_b, fpb, fq)
+                        ft = fq // TOPK
+                        ftb = fpb // TOPK
+                        farr = tl.sum((fheld & (fjj // TOPK == ft)).to(tl.int32), 0) * KS2
+                        farrb = tl.sum((fheld & (fjj // TOPK == ftb)).to(tl.int32), 0) * KS2
+                        if PDL:  # the wait on fq's arrivals ran above with the tile's rows; the partner's here
+                            if WAIT:
+                                if fvalid_b:
+                                    fseen_b = tl.atomic_add(arrive_ptr + fpb, 0, sem="acquire")
+                                    while fseen_b < NEED:
+                                        fseen_b = tl.atomic_add(arrive_ptr + fpb, 0, sem="acquire")
+                        _fp4_direct_down_two(g_ptr, u_ptr, wt_ptr, idx_ptr, map_ptr, start, w2_ptr, s2_ptr, part_ptr, cnt_ptr,
+                                             y_ptr, fq, fpb, fvalid_b, ftile, D, I, limit, TOPK, NT, fi_lo, fi_lo + I // KS2,
+                                             fks2, fP, BM, BN, BK, NATIVE, SUM, TMA, WAIT, KS, KS2, farr, farrb, True,
+                                             pd0, pd1, pd2, pcnt_ptr, pf0, pf1, pf2, NSUM, PEERS_OUT)
+                        if WAIT:  # fq's counters are zeroed below with the tile's rows; the partner's here
+                            if fvalid_b:
+                                fdoneb = tl.atomic_add(arrive_ptr + fP + fpb, 1, sem="acq_rel")
+                                if fdoneb == NT * KS2 - 1:
+                                    tl.store(arrive_ptr + fpb, 0)
+                                    tl.store(arrive_ptr + fP + fpb, 0)
+                elif fcount == 1:  # one pair: the direct kernel's own program
                     ft = (fq // TOPK).to(tl.int64)
                     farr = 0
                     for kk in range(TOPK):
@@ -4253,15 +4293,24 @@ FP4_DIRECT_GROUP = os.environ.get("VXPU_FP4_DIRECT_GROUP", "0")
 FP4_DIRECT_FIRST = os.environ.get("VXPU_FP4_DIRECT_FIRST", "0")
 # the first-pair form's tile body: a program whose expert has up to FIRST_MT rows loads them one row each into
 # registers (the per-slot form, no [BM, BK] gather staged through shared memory); above FIRST_MT the [BM, BK] gather
-# (G2D) carries the rows. 0 takes the gather always. Measured on the microbench (Nov 6): the gather form read 272 us
-# a layer against the direct form's 164 on 12 held pairs over 9.6 distinct experts (its x tile halves the resident
-# programs), the per-slot form is the A/B.
-FP4_FIRST_MT = int(os.environ.get("VXPU_FP4_FIRST_MT", "8"))
-# the first-pair form's down kernel: 1 the first-pair form too (one program per distinct expert and row tile), 0 the
-# direct down kernel as it is (one program per pair, two pairs a program under FP4_DN_PAIRS): the gate/up kernels hold
-# two thirds of an expert's bytes, where the saving is, and the down kernel's tuned per-pair form keeps its latency
-# chains shared two a program (the A/B, Nov 6).
-FP4_FIRST_DOWN = os.environ.get("VXPU_FP4_FIRST_DOWN", "1")
+# (G2D) carries the rows. 0 (the default) takes the gather always: on the real 8-row routing the gather body read
+# 126.6 us a layer against the per-slot body's 129.9 at MT 4 (Nov 6).
+FP4_FIRST_MT = int(os.environ.get("VXPU_FP4_FIRST_MT", "0"))
+# the first-pair down kernel: 0 (the default) the direct down kernel as it is (one program per pair, two pairs a
+# program under FP4_DN_PAIRS) under first-pair gate/up kernels; 1 the first-pair form in the down kernel too. Measured
+# on the real 8-row routing (Nov 6, TP4 slices, FP4_PDL 2): the direct form 130.3 us a layer, first-pair gate/up over
+# the direct down kernel 116.5 (gate/up 86.9 to 73.9, down 61.7 to 58.7 by kernel durations), the first-pair down
+# kernel as well 132.0: the gate/up kernels hold two thirds of an expert's bytes, where the saving is, and the
+# many-row down body (SwiGLU and the per-32 requantization on the tile every K step) costs more than the per-pair
+# form saves in bytes.
+FP4_FIRST_DOWN = os.environ.get("VXPU_FP4_FIRST_DOWN", "0")
+# the first-pair down kernel's singleton experts paired two a program (the direct down kernel's FP4_DN_PAIRS form):
+# the program of a singleton first pair whose rank among the singleton first pairs is even takes the next one too
+# (the rank from PP vector passes over the pair list in the prologue); the odd ones exit. Measured (Nov 6): without
+# PDL 168.3 us a layer against the direct form's 148.6 and the arm above's 126.6 on the same samples, bit-identical;
+# under FP4_PDL 2 Triton's layout pass (TritonGPURemoveLayoutConversions) fails on the partner's wait block, so the
+# form does not compile there. A closed negative; the knob stays for the record.
+FP4_FIRST_PAIR2 = os.environ.get("VXPU_FP4_FIRST_PAIR2", "0")
 # pairs a program's tile serves, one row of x each: 2 measured best at five rows (12.2 / 12.2 / 13.7 ms against 4's
 # 12.4 / 12.4 / 14.6 and 8's 14.7 / 12.9 / 18.4, one prompt / same prompt / different prompts; the direct kernels 13.4
 # / 13.2 / 13.3); the form helps where rows share experts and costs 0.4 to 1.2 where they do not, so it stays off
@@ -4754,8 +4803,8 @@ def _fp4_experts_direct(x_in, weights, slot_map, indices, start, w1, s1, w3, s3,
             float(swiglu_limit), topk, nt, S * K, 2 * nt1 * KS, *table, n, pairs, BM=BM, BN=bn2, BK=bk2, NATIVE=native, SUM=True, TMA=tma,
             PDL=pdl, WAIT=wait, KS=KS, KS2=KS2, COMPACT=compact, PP=pp, GROUP=group, GMT=int(FP4_GROUP_MT), TWO=two,
             pd0=pdests[0], pd1=pdests[1], pd2=pdests[2], pcnt_ptr=pcnt, pf0=pflags[0], pf1=pflags[1], pf2=pflags[2],
-            NSUM=n * nt, PEERS_OUT=npush, FIRST=first_down, FMT=int(FP4_FIRST_MT) if first_down else 0, num_warps=warps2,
-            num_stages=stages2, launch_pdl=pdl)
+            NSUM=n * nt, PEERS_OUT=npush, FIRST=first_down, FMT=int(FP4_FIRST_MT) if first_down else 0,
+            PAIR2=first_down and FP4_FIRST_PAIR2 in ("1", 1, True), num_warps=warps2, num_stages=stages2, launch_pdl=pdl)
     return y
 
 

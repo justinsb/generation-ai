@@ -7467,3 +7467,48 @@ per shape, and their dense linears (the tuned numbers pending at the close).
 Filed for codebot today: #529 the skeleton (plan in, run, record out), #530 the first substitution from a measured
 table, #531 the evaluation loop command, #532 cost model v0 on the critical path, #533 concurrency and overlap in the
 record, beside #525 and #527.
+**The first-pair form on the real 8-row routing (Nov 6).** The trace from the block-7 artifact (160 tokens, 68
+drafted steps a layer, 2,720 layer-steps): 48 pairs over 23.0 distinct experts a layer, 10.3 experts with two or more
+rows, 52 percent of the pairs sharing an expert, up to 8 rows on one. The microbench on 32 of those layer-steps
+(21.2 distinct on the samples), every arm bit-identical to the direct form: TP4 shape (4.7 MB slices, all 48 pairs,
+floor 69 us) direct 141.3 us a layer; first-pair gate/up kernels over the direct down kernel 126.6 (gather body) and
+129.9 (per-slot body MT 4); the first-pair down kernel as well 132.0 / 134.6. EP4 shape (whole 18.8 MB experts, a
+card's 11.8 held pairs over 4.8 distinct, floor 63 us) direct 143.5; first-pair gate/up over the direct down 126.2;
+the first-pair down kernel as well 187.5 / 183.6. The result: the gate/up kernels in the first-pair form read each
+distinct expert once and save 10 to 12 percent of the expert node in both shapes (about 0.6 ms a step at 40 layers);
+the down kernel keeps the direct form, whose two-pairs-a-program latency chains the first-pair form cannot share
+on singleton experts. The node stays 1.8x its floor: 126.6 us for 100 MB of distinct bytes is 790 GB/s, so the
+first-pair programs do not run at the direct form's per-program speed either; the floor wants the many-row tile at
+the one-row kernel's bandwidth, which this body does not reach. The arm goes to the step entries as
+VXPU_FP4_DIRECT_FIRST=1 VXPU_FP4_FIRST_DOWN=0 VXPU_FP4_FIRST_MT=0 (block-7 code against 465.1 at 14.06 ms, five-row
+prose against 263.3 at 11.37, then the budget arms, each gated against its same-tree control and the tree41
+control); the PDL arms (FP4_PDL 1 and 2, the entries' setting) are measured on the microbench for the record.
+
+**The first-pair arm under PDL, its split, and the tile sweeps (Nov 6).** TP4 shape, real routing, bit-identical in
+every arm. Under FP4_PDL 1: direct 138.7 us a layer, the arm (first-pair gate/up over the direct down kernel) 124.2;
+under FP4_PDL 2: 130.3 against 116.5; the saving is 10.5 percent at every PDL setting and PDL 2 is the best setting
+for both forms (the arm 1.69x the 69 us floor against the direct form's 1.89x). The split from kernel durations
+(compute kernels only) under PDL 2: direct gate/up 86.9 + down 61.7; the arm gate/up 73.9 + down 58.7 (the wall
+116.5, the two overlapping): the whole saving is in the gate/up launch, which reads its 67 MB of distinct bytes at
+907 GB/s against a 46 us floor; the down launch, still per pair over 75 MB (33 MB distinct, floor 23 us), is now the
+larger part above its floor, and its first-pair form loses today because singleton experts lose the two-pairs-a-
+program chain (the fix: pair singleton experts two a program, which needs a rank among the first pairs, a [PP, PP]
+compare in the prologue). The gate/up tile sweeps on the arm: stages 4 / 5 lose on both forms (163.0 / 165.3 against
+116.5; direct 135.6 / 145.2 against 130.3), BN 64 loses (150.6), BN 128 badly (279.6 and 269.2), BN 32 is the default
+(116.5 repeated): the winning tile is narrow and shallow, more and shorter programs rather than more bytes in flight
+per program.
+
+**The first-pair down kernel with paired singletons: a closed negative (Nov 6).** The singleton experts of the
+first-pair down kernel paired two a program as the direct down kernel pairs pairs (VXPU_FP4_FIRST_PAIR2: the rank
+among the singleton first pairs from PP vector passes over the pair list in the prologue, the partner's arrival wait
+and counter zeroing beside the tile's). Without PDL it compiles and is bit-identical, and reads 168.3 us a layer
+against the direct form's 148.6 and the arm's 126.6 on the same 8 samples: the first-pair down body loses on the
+experts with several rows, not on the singletons, because its tile does the SwiGLU, the routing weight and the
+per-32 requantization on a [16, BK] tile every K step where the per-pair kernel does one row, and that costs more
+than the w2 bytes it saves. Under FP4_PDL 2 the kernel does not compile: Triton's layout pass
+(TritonGPURemoveLayoutConversions) fails, and the bisect places it in the partner's wait block (the one-pair body in
+place of the two-pair call fails the same way, the scan removed fails the same way, PDL off compiles). The knob stays
+in the code, off. The first-pair form's defaults now select the measured arm (the direct down kernel, the gather
+body), so VXPU_FP4_DIRECT_FIRST=1 alone is the arm; the gate/up K step 128 (108.0 against 116.5 us) is the one
+further lever that measured, a table knob for the entries.
+
