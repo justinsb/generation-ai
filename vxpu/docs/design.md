@@ -7530,3 +7530,10 @@ resident channels, a residue of about 160 us a layer above the one-process node 
 Its harness rate (1,426.6) sits below F92's through the acceptance draw (84 steps against 77 at identical text); the
 step is the comparison. The pod A agent's d2 reads 147 us a site under the same env with all four cards on one socket
 (bus 05, 06, 0A, 0B) against C's split (05, 85, 89, 8A).
+
+**The exact fusions on the entry (Nov 6, 21:19 UTC).** F94-16c-deep7-fixed7-tuned-fuse3 (F93b plus FP4_FUSE_EPI=3):
+1,569.9 tok/s at 52.07 ms a step (79 steps, 5.11 accepted, the same draw as F93b), text identical; the knob is worth
+0.64 ms a step: the expert node 486 us a layer from 508 in the main program and 638 from 647 in the 128-row program,
+nothing else moved. The stack in four processes: 1,569.9 at 52.07 against the one-process fixed-7 arm's 1,370.9 at
+56.27 and the block-5 entry of record's 1,538.9 at 39.3; the four changes compose on the stamps (the transport 66 us
+a site, the tiles 1.75 ms, the fusions 0.64, the host hop 1.8 and the drafter's program 2.5 against 4.9 in one process).
