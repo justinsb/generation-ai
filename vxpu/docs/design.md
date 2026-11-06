@@ -7161,3 +7161,15 @@ tree48 packages copied to C's cache); the record carries EXPERT_TP_env 4. Memory
 placement choice measured once on an old tree stayed the default for twelve trees; the planner re-measures its
 choices when the step changes.
 
+**The 8-stream prose placement, the same-tree control (Nov 6, pod C).** W48-8p-bf16f-C, the EP4 configuration
+rerun on C: 829.6 tok/s at 26.24 ms median (25.48 mean), 1.83 accepted a step a row, its text departing from D's
+W48-8p-bf16f at char 291 while the step time matches D to 0.02 ms (25.48 against 25.46 mean): the pods agree on the
+step, and the slots policy's picks move the text and the acceptance between runs, as the 16-stream rectangle repeats
+did. On one pod the slices read 866.6 at 23.76 against the quarter's 829.6 at 25.48: 4.5 percent more throughput
+from a step 1.7 ms shorter, the measured part; against D's 798.7 the 8.5 percent includes the policy's draw. The
+depth at 16 streams is capped by the export (a block-5 drafter, step_tokens 5: four drafts a stream, the deepest
+flat 80 = 16 x 5) and the plan's draft 4; the policy "slots" gives every live row its token row and fills the rest
+of the smallest flat program that fits with the drafts of the highest survival across streams, so it issued 3.41 of
+4 at 97 percent conditional acceptance on code: the cap binds, not the policy, and a deeper step needs a block-7
+b16 export with flats at 96 and 112 rows.
+
