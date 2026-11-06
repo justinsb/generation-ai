@@ -7328,3 +7328,49 @@ resolves "cuda" to cuda:rank under multiproc and the launcher binds every new th
 run: the 16-stream code entry, fixed depth 7 on the 128-row program (no host choice: the certain lockstep; its
 one-process number 1,370.9 tok/s at 56.27 ms), then the slots arm (sb7, five programs; one-process text identical to
 the fixed arm's), each gated on text against its one-process arm and W50-16c-bf16f. Numbers below when read.
+
+**One process per rank, measured (Nov 6, 19:00 UTC, pod C, chain C144).** The 16-stream code entry (their 16
+prompts, 400 greedy tokens, block-7 main, fixed depth 7 on the 128-row program) in four processes, one per card,
+every sum site an NCCL all-reduce plus the reference epilogue as aten ops, the head an NCCL all-gather, no host
+exchange between the ranks at any step. Text identical to the one-process arm (W88-16c-deep7-fixed7) over the gate's
+300 chars on both wires; the four processes agreed at every step without a broadcast. Measured (medians):
+
+| arm | tok/s | step ms | verify (128 rows) | drafter | accepted/step | load |
+|---|---|---|---|---|---|---|
+| one process, push sums, bf16 wire (W88-16c-deep7-fixed7) | 1,370.9 | 56.27 | about 52 (inferred) | 4.87 | 5.12 | 223 s |
+| four processes, NCCL fp32 wire (M90b-16c-deep7-fixed7) | 1,156.8 | 75.08 | 71.5 | 4.09 | 5.26 | 104 s |
+| four processes, NCCL bf16 wire (M90b-16c-deep7-fixed7-w16) | 1,146.5 | 66.53 | 63.6 | 3.47 | 5.07 | 104 s |
+
+The host between the programs is gone (host_ms 0.0, the drafter's program 0.8 to 1.4 ms faster, the load 2.1x
+faster with the four ranks slicing and compiling in parallel), and the step is 10.3 ms slower on the bf16 wire and
+18.8 on fp32: about 115 and 210 us a site over 90 sites (inferred from the step difference; the sites are not stamped
+in these runs). Their profiled step pays 70.6 us a site for the same NCCL bf16 ring kernel (90.0 on rank 3), so the
+extra is not NCCL's wire cost alone: the candidates are the epilogue, which the one-process form fuses into the sum
+kernel and this form runs as five to eight aten kernels a site at 128 rows x 5,120 x hc, the casts around the wire,
+and the NCCL settings their stack sets (algorithm, protocol, channel count); a stamped run with the sites bracketed
+separates them. Per the coordinator the speed arms of this form stop here: their sums cost what ours cost (8.7 ms a
+step against our 9.0 to 9.9), so NCCL is not where their step wins, and the four-process mechanics stay as the
+engine's path, judged on the host hop and the load time, not on the sum form. The wrong-text run before the fix
+(65.9 ms a step at 1.27 accepted) is not comparable: its streams ended early and its contexts stayed short.
+
+**The 16-stream step, theirs against ours, class by class (Nov 6; the close of the width story).** Their 16-slot
+step profiled on this node tonight (rank 0, median of 35 decode steps, their code prompts; prose beside in
+parentheses): wall 44.4 ms (32.9), three graph launches, 2,237 kernels, idle 0.47 ms (0.51). Ours: the one-process
+step at 128 rows (tree88, the per-rank timeline, the stamped verify span 44.7 to 45.8 and the harness's step 52.4 to
+56.3, all ranks the same at every class).
+
+| class | theirs, code (prose) | ours, code | reading |
+|---|---|---|---|
+| experts | 22.2 ms: W4A8 phase 1 14.3 at 358 us a launch + phase 2 6.8 at 169, 40 launches each, 527 us a layer (14.4) | expert node 19.6: 492 us a layer, of which the two GEMMs 393 at the HBM floor, ten small kernels about 60 | ours the better node by about 1.4 us a layer-step in 40 layers; their kernel is not the lever |
+| sums | 8.7: 90 NCCL bf16 ring all-reduces at 70.6 us mean on rank 0, 90.0 on rank 3, plus 2 all-gathers at 1,152 us for the head (6.6) | 9.0 to 9.9: 90 push sites at 85 us, the head's gather 0.83 | equal; neither step overlaps its sums |
+| attention | 3.7: unified MLA decode 45 us x 38, the indexer, merge, rotary (2.5) | core 5.1 + projections 3.2 | theirs ahead by about 4.6 ms: the indexer and MLA path in one kernel set |
+| dense fronts and other | 9.4 GEMM and quant + 0.9 norm and other (9.0 + 0.8) | router front 3.7 + hc front 2.2 + projections (counted above) + dense other 1.5 + engram 0.9 | about even once the projections are placed |
+| drafter | 3.7 span, two replays inside the step (3.6) | 4.4 to 4.8, a separate program | theirs ahead by about 1 ms, inside the step |
+| gaps | 0.47 idle, 5.7 eager span between replays overlapped by the drafter | 1.8 host between the programs + 1.5 in-graph gaps of 20 to 150 us | theirs ahead by about 2.8 ms |
+| step | 44.4 (32.9) | 52.4 to 56.3 | the sum of the rows above |
+
+Measured on both sides (their numbers from the trace's kernel classes, ours from the in-graph stamps and the
+kernel dumps); the attention and the gaps are the two classes where they lead by more than a millisecond, the
+drafter the third; the expert node and the sums are ours or equal. Their all-reduce reads 70 to 90 us a site at the
+same rows, and our NCCL form in four processes read more than that (above), so the sum form is closed as a lever in
+either direction; the attention path and the drafter inside the step are the next run's items.
