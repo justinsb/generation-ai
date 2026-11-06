@@ -7262,3 +7262,13 @@ kernels" shrinks to about 40; the fusable remainder is the ten small kernels (2.
 levers of the 16-stream code step stand: the drafter's program and the host between the programs (7 ms), the sum
 sites (85 us a site, 7.7 to 9.9 ms), the ten small kernels (2.4 ms).
 
+**The package key is stable across processes (Nov 6, correction).** The reading that every load rebuilt 17 to 30
+segments a rank program under a moving key was wrong: pod A's second load of the same program set and plan in a
+fresh process read "373 loaded from the cache, 0 built" for every rank program built an hour before, and C's key log
+(aoti.py: the key inputs of every package built, 141 in two loads) holds no segment built twice under different keys
+for equal inputs; the repeated code hashes are different programs with the same code (a 2,048- against a 4,096-slot
+cache window argument) or the two n-gram layers' tables. The day's builds were new (segment, program set, plan)
+combinations, paid once each; the key log stays as the instrument. The load-time item found beside it (pod A): the
+cold n-gram table's populate runs at 1.3 MB/s under MADV_RANDOM with readahead off (1,125 s cold against 0.9 s warm),
+to be fixed by a MADV_WILLNEED or a sequential fadvise before the populate.
+
