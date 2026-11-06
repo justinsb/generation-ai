@@ -2010,7 +2010,6 @@ class Engine:
             pinned_rows = [torch.empty(R, width, dtype=torch.long, pin_memory=True) for _ in range(2)]
             pinned_draft = [torch.empty(R, dout.numel() // R, dtype=dout.dtype, pin_memory=True) for _ in range(2)]
             counts_t = torch.zeros(R, dtype=torch.long, device=dev0)
-            cols = torch.arange(max_draft, device=dev0)
 
         def write(bufs, ids, posv):
             for named in bufs:
@@ -2151,10 +2150,7 @@ class Engine:
             chosen = verify.graphs[0]._chosen
             with torch.cuda.device(dev0), torch.cuda.stream(stream):
                 counts_t.copy_(torch.tensor(issued, dtype=torch.long), non_blocking=True)
-                mask = cols[None, :vrows - 1] < counts_t[:, None]  # [R, vrows - 1]
-                d = dout.view(R, -1)
-                drafts_t = d[:, :vrows - 1]
-                ids_t = torch.cat([first_t, torch.where(mask, drafts_t, first_t)], 1)  # [R, vrows]
+                ids_t, mask = _spec_verify_rows(first_t, dout, counts_t, vrows, block)  # [R, vrows], [R, vrows - 1]
                 if layout is not None:
                     # the rows laid out flat: row (i, k) is row i's token k at pos[i] + k, reading sequence i's state
                     lay = torch.tensor([lay_seq, lay_rank], dtype=torch.long).to(dev0, non_blocking=True)
@@ -4369,6 +4365,22 @@ def _fp8_head(fqn, meta, shared, aliases):
     if tuple(out.shape) != tuple(meta.shape):
         raise ValueError(f"{fqn}: derived {tuple(out.shape)} where the graph expects {tuple(meta.shape)}")
     return out
+
+
+def _spec_verify_rows(first_t, dout, counts_t, vrows, block):
+    """The verify's input rows from the drafter's output, on the device (the fixed, half and flat shapes):
+    ids [R, vrows], each row's token then its drafts up to the count it issues, every other position its
+    token (never kept); mask [R, vrows - 1], the issued positions, which the acceptance reads. Both are the
+    verify program's width (vrows), not the policy's depth: a fixed draft of 5 on a block-7 drafter issues
+    5 a row into the 8-row program, and the mask and the drafts were sized apart before (hero run 15: "the
+    size of tensor a (5) must match the size of tensor b (7)"). A program wider than the block pads the
+    rest with the token."""
+    R, k = first_t.shape[0], vrows - 1
+    drafts = dout.view(R, -1)[:, :min(k, block)]
+    if drafts.shape[1] < k:
+        drafts = torch.cat([drafts, first_t.expand(R, k - drafts.shape[1])], 1)
+    mask = torch.arange(k, device=first_t.device)[None, :] < counts_t[:, None]
+    return torch.cat([first_t, torch.where(mask, drafts, first_t)], 1), mask
 
 
 def _draft_layout(engine):
