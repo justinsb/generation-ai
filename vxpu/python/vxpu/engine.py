@@ -2234,6 +2234,7 @@ class Engine:
                 step_acc.append(int(n))
                 out["drafted"] += iss; out["accepted"] += n
                 account["issued"].append(iss); account["accepted"].append(n)
+                req_hist[i].append(int(n))  # the per-request controller's history: the flat path's rows come back through the ring
                 for tok in ids_h[1:n + 1] + [ch_h[n]]:
                     tokens[i].append(tok)
                     if tok in self.eos_ids or len(tokens[i]) >= max_new_tokens:
