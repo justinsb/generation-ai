@@ -7972,6 +7972,37 @@ nothing else moved. The stack in four processes: 1,569.9 at 52.07 against the on
 56.27 and the block-5 entry of record's 1,538.9 at 39.3; the four changes compose on the stamps (the transport 66 us
 a site, the tiles 1.75 ms, the fusions 0.64, the host hop 1.8 and the drafter's program 2.5 against 4.9 in one process).
 
+**The own push form across the processes (Nov 6, 21:28 UTC), and the expert node's residue placed.**
+P92b-16c-deep7-fixed7-push (h15-ppr-ipc fd3b4d6: the push and scatter sums over CUDA IPC, every peer buffer opened
+under the rank's own context): 1,374.1 tok/s at 56.20 ms a step (84 steps, 5.12 accepted), text identical. The sum
+sites read 84 to 85 us a site, the one-process push form's figure, so the mapping costs nothing; the embedding's push
+across processes costs 278 us a call in the main program and 1,479 in the drafter's (93 under NCCL's all-reduce of
+the rows), which is why the step trails NCCL at 4 channels (54.17). The expert node reads 664 us a layer in the
+128-row program with no NCCL kernel in the step (NCCL at 4 channels 655, at 16 channels 705, one process 492): the
+residue of 160 to 170 us a layer belongs to the four-process form itself, not to NCCL's channels (which move it by
+50). The per-rank kernel table inside the node is the next instrument; the candidates are the per-process expert
+pool's slot map against the four-pool map and the per-process allocator's placement of the pools.
+
+**The stack on fixed depth 7 (Nov 6, 21:31 UTC): 1,630.8 tok/s at 51.75 ms in four processes.**
+F93c-16c-deep7-fixed7-tuned-nccl4-fuse3: the swept table, the two exact expert fusions, their NCCL env at 4 channels,
+the fused mix epilogue, four processes; 77 steps, 5.14 accepted of 7, text identical. Stamped: the main program 42.81
+ms (experts 483 us a layer, island 283 overlapped, sum sites 79 us x 89, attention core 4.97 ms, ffn front 3.68,
+projections 31 us a launch, hc front 1.95), the 128-row program 49.55 (experts 638, island 382), the drafter 2.20.
+The ladder, each step text-identical: 1,146.5 (NCCL, the aten epilogue) -> 1,388.5 (the fused mix) -> 1,525.2 (their
+transport: P2P across the socket) -> 1,549.9 (the tiles) -> 1,569.9 (the exact fusions) -> 1,630.8 (4 channels),
+against the one-process push form's 1,370.9 at 56.27 on the same fixed-7 configuration and the block-5 entry of
+record's 1,538.9 at 39.3. Open in this form: the expert node's 160 us a layer over one process (the profiler arm), and
+the stack on the block-5 fold itself (S93), both queued.
+
+**The repeats and the second sweep (Nov 6, 21:42 UTC).** F93c's repeats read 1,630.3 at 51.74 and 1,628.8 at 51.82
+(77 steps, 5.14 accepted, text identical), so the four-process 16-stream code entry is a median of three: 1,630.3
+tok/s at 51.75 ms a step. The fronts' and the attention core's knobs at the model's shapes on card 0: the router
+front (ffn_front_split) 92.0 us at BD 512 EB 8 RB 8 against 87.7 at BD 1024 (rows 128; 82.9 against 73.5 at 112), the
+hc front 40.2 against 38.9 at BD 1024 RB 4 (37.7 against 33.2 at 112), neither winner bit-identical to the current
+knobs (the chunk width moves the fp32 partial sums, a class); FRONT_DOTS_MMA=1 slower at 110.3; the attention core
+already at its best tile (ATTN_TB 32: 79.3 us at 128 rows against 16 and 64; 128 exceeds shared memory). About
+0.26 ms a step for a class change: not rebuilt tonight; the entries stay for a text-gated morning run.
+
 **The league table at the close of hero 15 (Nov 6, 10:30 UTC; two readings still running).** Their numbers are the
 vLLM fork measured on our four cards by the vllm-ref pod, the league method (one prompt a case, the decode window).
 One stream, prose: the five-row fp8-head drafter under the cost-model budget (plan b4h, programs 1 to 4, TP4
