@@ -118,11 +118,18 @@ def run(x_in, weights, slots, indices, start, w2, swiglu_limit, per_pair=False, 
         ids = slots[(indices.reshape(-1) - start).long()].view(indices.shape)
     else:
         ids = slots
-    ids = ids.to(torch.int32).contiguous()
+    ids = ids.to(torch.int32)
+    w = weights.to(torch.float32)
+    # the step's padded rows (the flat programs' spare rows, a draft slot not issued) reach this op with whatever slot
+    # ids their rows hold; their kernel reads the expert an id names, so an id outside [0, E) corrupts other rows
+    # (the 8-stream run of Nov 6: degenerate text). Their own dynamic path masks such rows with valid-row tasks; here
+    # the mask is the ids' range and the routing weights: an invalid pair becomes expert 0 with weight 0.
+    valid = (ids >= 0) & (ids < pack.E) & (w != 0)
+    ids = torch.where(valid, ids, torch.zeros_like(ids)).contiguous()
+    w = torch.where(valid, w, torch.zeros_like(w)).contiguous()
     n, topk = ids.shape
     K = x_in.shape[1]
     x = x_in.contiguous()
-    w = weights.to(torch.float32).contiguous()
     route = launch(scratch=pack.scratch(n, topk), a=x, topk_ids=ids, topk_weights=w, w13=pack.w13, w13_scales=pack.s13,
                    w2=pack.w2, w2_scales=pack.s2, alpha1=pack.alpha, alpha2=pack.alpha, input_scale=pack.one,
                    down_scale=pack.one, max_tokens=n, num_topk=topk, swiglu_limit=float(swiglu_limit), fast_math=FAST_MATH)
