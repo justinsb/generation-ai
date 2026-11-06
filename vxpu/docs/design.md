@@ -7580,3 +7580,17 @@ acceptance. The step is 4.3 ms under W50's 39.28 (the stack's saving on this bas
 rows and fills it by survival, and never grows the program for more drafts. A defect for the morning. The build was
 10 minutes, not 50: the table and the fusion source touch 28 of the main program's 373 segments and 9 of each flat's
 34. The fixed-depth-4 arm on the 80-row program (S94) is the clean reading of the stack on this base.
+
+**The block-5 fold at fixed depth 4 (Nov 6, 21:56 UTC), and the residue withdrawn.** S94-16c-b5-fixed4-stack (the
+block-5 main with the 80-row flat at fixed depth 4, the stack, four processes): 1,472.6 tok/s at 43.35 ms a step (101
+steps, 3.48 accepted of 4, 3.96 tokens a step a row), text identical to W50; its repeats within 0.3 percent. Under
+the entry of record (1,538.9 at 39.28): the sum sites at 80 rows are 60 us in both forms, the table has no entries at
+80 rows, and the step grows slowly with rows (main 36.8, flat48 32.9, flat80 41.2, flat128 49.5 ms in four processes),
+so depth wins and fixed 7 at block 7 is the shape, as it is for them. The "expert node residue" of the four-process
+form is withdrawn: the league accounts put the same 128-row program at 49.66 ms in four processes (F93c) against
+51.61 in one (W88), and the three-step profiles agree (the node's bracket 309 us covered against 463, no idle in
+either); the 634-against-492 reading compared different runs and brackets. What is real: the same program reads 36.2
+ms in the harness's warm-up steps and 49.7 in the wave, in both forms. The warm-up runs 16 copies of one short
+prompt, so the streams route identically and the expert node reads a fraction of the distinct slices (the GEMM
+form's bytes scale with distinct experts; gate/up 191 us in the short-context profile against 292 to 320 at full
+diversity), and the contexts are 30 tokens against 400; the wave profile (C165) carries the per-kernel table.
