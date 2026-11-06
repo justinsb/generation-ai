@@ -7559,3 +7559,12 @@ transport: P2P across the socket) -> 1,549.9 (the tiles) -> 1,569.9 (the exact f
 against the one-process push form's 1,370.9 at 56.27 on the same fixed-7 configuration and the block-5 entry of
 record's 1,538.9 at 39.3. Open in this form: the expert node's 160 us a layer over one process (the profiler arm), and
 the stack on the block-5 fold itself (S93), both queued.
+
+**The repeats and the second sweep (Nov 6, 21:42 UTC).** F93c's repeats read 1,630.3 at 51.74 and 1,628.8 at 51.82
+(77 steps, 5.14 accepted, text identical), so the four-process 16-stream code entry is a median of three: 1,630.3
+tok/s at 51.75 ms a step. The fronts' and the attention core's knobs at the model's shapes on card 0: the router
+front (ffn_front_split) 92.0 us at BD 512 EB 8 RB 8 against 87.7 at BD 1024 (rows 128; 82.9 against 73.5 at 112), the
+hc front 40.2 against 38.9 at BD 1024 RB 4 (37.7 against 33.2 at 112), neither winner bit-identical to the current
+knobs (the chunk width moves the fp32 partial sums, a class); FRONT_DOTS_MMA=1 slower at 110.3; the attention core
+already at its best tile (ATTN_TB 32: 79.3 us at 128 rows against 16 and 64; 128 exceeds shared memory). About
+0.26 ms a step for a class change: not rebuilt tonight; the entries stay for a text-gated morning run.
