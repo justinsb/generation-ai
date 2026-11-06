@@ -7568,3 +7568,15 @@ hc front 40.2 against 38.9 at BD 1024 RB 4 (37.7 against 33.2 at 112), neither w
 knobs (the chunk width moves the fp32 partial sums, a class); FRONT_DOTS_MMA=1 slower at 110.3; the attention core
 already at its best tile (ATTN_TB 32: 79.3 us at 128 rows against 16 and 64; 128 exceeds shared memory). About
 0.26 ms a step for a class change: not rebuilt tonight; the entries stay for a text-gated morning run.
+
+**The stack on the block-5 fold (Nov 6, 21:51 UTC): the step 4.3 ms under the entry of record, the layout
+under-issuing.** S93-16c-b5-stack (the block-5 main with the flats f48/f64/f80, the sb slots layout, four processes,
+the table, FP4_FUSE_EPI=3, their env at 4 channels): 1,260.5 tok/s at 34.96 ms a step (144 steps), 2.13 accepted of
+2.18 issued, conditional acceptance 0.99 at every position; the text matched W50-16c-bf16f, the gate failed on the
+acceptance. The step is 4.3 ms under W50's 39.28 (the stack's saving on this base: sum sites 60 us at 80 rows, experts
+487 us a layer, attention core 91 us, projections 36, ffn front 64, hc front 32), but the merged slots form chose the
+48-row program in 131 of 144 steps where W50's rate-ordered form (speculation's, tree50) ran flat64 in 53, flat80 in
+36, flat48 in 8 and the 5-row program in 6 and issued 3.41: the merged form takes the smallest flat that holds the live
+rows and fills it by survival, and never grows the program for more drafts. A defect for the morning. The build was
+10 minutes, not 50: the table and the fusion source touch 28 of the main program's 373 segments and 9 of each flat's
+34. The fixed-depth-4 arm on the 80-row program (S94) is the clean reading of the stack on this base.
