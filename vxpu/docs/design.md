@@ -7250,3 +7250,15 @@ host hop (the one-pass block-7 drafter); the sum form at width (85 us a site); t
 its kernels, whose home is neither the island, nor the sums, nor a slow rank (a per-kernel table inside one node span
 is the next instrument).
 
+**The expert node at 128 rows, kernel by kernel (Nov 6, pod C).** From the profiler dump of the fixed depth-7 step
+(card 0, the last step, 53.1 ms): one node's bracket from the router front's last kernel to the FFN sum's first, in
+launch order: elementwise 1.3 us, MXFP8 recode 2.1, the slot gather 8.1, the island's dual GEMV 41.9 (side stream),
+elementwise 2.8, the grouped schedule 5.2, elementwise 4.7, the gate-up GEMM 307.3, SwiGLU rows 14.4, recode 2.2, the
+island's w2 GEMV 11.9 (side stream), SwiGLU quant 3.3, the down GEMM 123.2, an aten reduce 6.8, a fused copy 2.2, the
+sum's push 30.8; span 510 us. Over the step's 43 nodes: span median 488 us, idle inside 2 us; gate-up 281, down 112,
+the ten small kernels about 60. At 768 pairs over about 120 distinct slices (564 MB) the two GEMMs run at 1.43 TB/s,
+the HBM floor, so the expert node is 92 percent its own kernels at this width and the earlier "190 us above the
+kernels" shrinks to about 40; the fusable remainder is the ten small kernels (2.4 ms a step), a hero 16 item. The
+levers of the 16-stream code step stand: the drafter's program and the host between the programs (7 ms), the sum
+sites (85 us a site, 7.7 to 9.9 ms), the ten small kernels (2.4 ms).
+
