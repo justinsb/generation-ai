@@ -860,6 +860,11 @@ class StepGraph(torch.nn.Module):
         # on the real model); one Comm per process, set up by rank 0 for every all-reduce site of
         # the step before any rank captures
         from . import allreduce as ar
+        if self.world.multiproc:
+            # a process per rank (multiproc.py): every collective is an NCCL call on this rank's communicator,
+            # captured as any kernel; no inboxes, flags or Comm on the peers' cards, nothing to warm here
+            self._comm_sums = False
+            return
         likes = {}
         hcs = set()
         warmed = set()
@@ -1022,6 +1027,18 @@ class StepGraph(torch.nn.Module):
                 if gemv:
                     return mixed(ops.gemv_partial(x, weight, scale, add))
                 return mixed(x.clone()) if node.kind == "allreduce" else torch.cat([x] * self.world.size, dim=-1)
+        if self.world.multiproc:
+            # a process per rank (multiproc.py): the partial (the GEMV's result for a fused site) summed as fp32
+            # over NCCL on this rank's communicator and rounded once, then the mix as the reference's aten ops;
+            # the head's gather an NCCL all-gather in rank order. Issued on the capturing stream, so a replay
+            # runs them as the one-process form's kernels, without a host hop between the ranks.
+            from . import multiproc
+            with torch.cuda.stream(stream):
+                if gemv:
+                    x = ops.gemv_partial(x, weight, scale, add)
+                if node.kind == "allreduce":
+                    return mixed(multiproc.allreduce_exact(x))
+                return multiproc.allgather(x)
         if node.kind == "allreduce" and getattr(self, "_comm_sums", False):
             site = self._sum_sites
             self._sum_sites += 1
@@ -1085,6 +1102,19 @@ class StepGraph(torch.nn.Module):
         # the rank's first vocabulary index is a constant of the op's call inside the segment (the split
         # hands a node only its tensor inputs), read off the segment's graph as _gemv_sum reads its op
         start = args_[2] if len(args_) > 2 else self._embed_start(node.name)
+        if self.world.multiproc:
+            # a process per rank (multiproc.py): this rank's rows of the table, zero for the ids it does not own,
+            # summed over NCCL; the peers' shards are in other processes. Not World.embed_rows: the prime captures
+            # in solo mode, where its sum is a clone, and the captured graph is the one replayed (the first
+            # four-process run read ". The code. The code." for every stream: the other ranks' rows were zero)
+            import torch.nn.functional as F
+            from . import multiproc
+            with torch.cuda.stream(stream):
+                sh = shard.contiguous()
+                local = ids - start
+                mask = (local < 0) | (local >= sh.shape[0])
+                y = F.embedding(local.masked_fill(mask, 0), sh).masked_fill(mask.unsqueeze(-1), 0)
+                return multiproc.allreduce_exact(y).to(sh.dtype)
         if self.world.size == 1:
             with torch.cuda.stream(stream):
                 return self.world.embed_rows(ids, shard.contiguous(), start)

@@ -7670,6 +7670,119 @@ kernels" shrinks to about 40; the fusable remainder is the ten small kernels (2.
 levers of the 16-stream code step stand: the drafter's program and the host between the programs (7 ms), the sum
 sites (85 us a site, 7.7 to 9.9 ms), the ten small kernels (2.4 ms).
 
+**The package key is stable across processes (Nov 6, correction).** The reading that every load rebuilt 17 to 30
+segments a rank program under a moving key was wrong: pod A's second load of the same program set and plan in a
+fresh process read "373 loaded from the cache, 0 built" for every rank program built an hour before, and C's key log
+(aoti.py: the key inputs of every package built, 141 in two loads) holds no segment built twice under different keys
+for equal inputs; the repeated code hashes are different programs with the same code (a 2,048- against a 4,096-slot
+cache window argument) or the two n-gram layers' tables. The day's builds were new (segment, program set, plan)
+combinations, paid once each; the key log stays as the instrument. The load-time item found beside it (pod A): the
+cold n-gram table's populate runs at 1.3 MB/s under MADV_RANDOM with readahead off (1,125 s cold against 0.9 s warm),
+to be fixed by a MADV_WILLNEED or a sequential fadvise before the populate.
+
+**Two results of the last hour (Nov 6).** The fixed policy with a draft smaller than the drafter's block is a bug:
+the fixed depth-5 and depth-6 arms on the block-7 export (plans f5flat and f6flat) raised in engine._tp_spec_half at
+the acceptance (line 2131: torch.where over a mask of width 5 or 6 against drafts of width 7); the fixed depth-7 arm
+ran because 7 equals the block. Not fixed tonight; the depth curve at 16 streams code stands at 3.4 issued (block 5:
+1,538.9 at 39.3 ms), 5.25 (f96, 1,553.8 at 49.1), 5.8 (the cost model, 1,533.9 at 51.7) and 7 (1,370.9 at 55.4). An
+NCCL sum form in the step: the sum sites are collective nodes outside the packages (no digest moves) and the site's
+epilogue exists as plain ops, but torch.cuda.nccl.all_reduce is the single-process multi-device path that issues every
+device's operation in one group call on one communicator, which cannot be split across our four per-rank graphs
+(captured one rank at a time in solo mode, replayed by four threads); issued from one rank's capture it would block the
+other devices' eager streams on a kernel that exists only in the graph. The form that fits is one communicator per
+rank in one process (ncclGetUniqueId, four ncclCommInitRank in a group, each rank's ncclAllReduce on its own stream
+and thread), which torch exposes only through torch.distributed's one process per rank: a ctypes binding of libnccl,
+the sum-site form and a solo-mode bypass for the prime, about three hours before a first measurement; a hero 16
+build, not a knob.
+
+
+**The host hop, measured (Nov 6, the motivation for one process per rank).** From the profiler dumps on disk
+(device 0's kernel gaps over the last three steps and the main thread's runtime calls overlapping them; the rank
+threads' launches appear only through the devices' first kernels). 16 streams code, 128 rows, the fixed depth-7
+step (53.1 ms; the verify program's stamped span 44.7 to 45.8, the drafter's program 4.4 to 4.8): device 0 idle
+1.79 ms a step in four gaps of 0.15 to 1 ms: 0.79 after the verify's last device copy (the host's acceptance and the
+next launches: event queries, elapsed-time reads, then the 4.37 ms event wait on the drafter), 0.40 between the
+PtoP copies that carry the drafter's output to the other three ranks (10 PtoP copies a step), 0.28 and 0.29 around
+the pinned DtoH and HtoD round trip of the tokens (4 DtoH, 3 HtoD a step); 1.42 ms more in gaps of 20 to 150 us and
+1.48 in gaps under 20 us (node boundaries inside the graphs); the four rank graphs' first kernels within 15 to 70 us
+of device 0's (one case +509); one cudaGraphLaunch of the 505-node graph read 2.7 ms on the host thread. One
+stream, block-7 code (14.0 ms): idle 0.07 ms a step in two gaps above 60 us (0.09 around the token's pinned DtoH,
+0.12 over seven clone-and-copy sequences of 11 to 22 us each), 0.14 in gaps of 20 to 150 us, 1.13 under 20 us; the
+rank graphs' launches serialized about 35 us apart (d1 +30 to 36, d2 +68 to 76, d3 +96 to 112 us after d0). So the
+hop between the two programs is 1.8 ms a step at 16 streams and 0.07 at one; one process per rank removes the
+serialized acceptance-and-launch, turns the broadcast and the pinned round trips into in-stream collectives and
+parallelizes the launches; the drafter's program itself stays a separate program in either model.
+
+**One process per rank, built (Nov 6 evening, the user's "just yolo-run it").** multiproc.py: with VXPU_MP_WORLD
+and VXPU_MP_RANK the engine is one rank of a four-process world on its own card. parallel.World holds one local
+rank (World.ranks and rank_graphs replace the engine's loops over the world's devices), its eager sums and gathers go
+over NCCL, its barrier is a no-op; the step graph's collective nodes become an NCCL all-reduce of the fp32 partial
+(the GEMV's result at a fused site) rounded once plus the reference epilogue, or an NCCL all-gather for the head;
+the embedding's rows are this rank's shard summed over NCCL; the expert slices are this card's part alone; no Comm,
+inboxes or flags on the peers' cards. The binding is ctypes over the libnccl torch ships (one communicator per
+process from the unique id rank 0 writes to a file), chosen over torch.distributed because the same binding was
+proven under per-rank capture on pod C first: four communicators in one process, each rank's all-reduce captured
+from its own thread and replayed from four threads, sums correct; a 4 MB fp32 all-reduce 0.85 ms a replay including
+the thread start (measured). NCCL connects its channels at a communicator's first collective with a handshake over
+the bootstrap socket (the init log shows the channels made after "communicators initialised"), which would deadlock
+if that first collective were issued inside a capture with the peers elsewhere, so init runs eager warm-up
+collectives (both dtypes, both collectives, five sizes) before any capture. The host loop (draft, accept, launch) runs
+in every process over the same data: the ranks hold the gathered logits after the head, so each process makes the
+same choices without a broadcast, which requires a timing-free policy (fixed; slots by survival); the budget and
+cost-model policies read timings and would let the processes diverge. Two traps found at the first start: the
+loader's and the placement's worker threads begin with card 0 as their current device, so a device of "cuda" put
+every process's dense weights and expert slices on card 0 (2.7 GB a process during the load); the engine now
+resolves "cuda" to cuda:rank under multiproc and the launcher binds every new thread to the rank's card. The first
+run: the 16-stream code entry, fixed depth 7 on the 128-row program (no host choice: the certain lockstep; its
+one-process number 1,370.9 tok/s at 56.27 ms), then the slots arm (sb7, five programs; one-process text identical to
+the fixed arm's), each gated on text against its one-process arm and W50-16c-bf16f. Numbers below when read.
+
+**One process per rank, measured (Nov 6, 19:00 UTC, pod C, chain C144).** The 16-stream code entry (their 16
+prompts, 400 greedy tokens, block-7 main, fixed depth 7 on the 128-row program) in four processes, one per card,
+every sum site an NCCL all-reduce plus the reference epilogue as aten ops, the head an NCCL all-gather, no host
+exchange between the ranks at any step. Text identical to the one-process arm (W88-16c-deep7-fixed7) over the gate's
+300 chars on both wires; the four processes agreed at every step without a broadcast. Measured (medians):
+
+| arm | tok/s | step ms | verify (128 rows) | drafter | accepted/step | load |
+|---|---|---|---|---|---|---|
+| one process, push sums, bf16 wire (W88-16c-deep7-fixed7) | 1,370.9 | 56.27 | about 52 (inferred) | 4.87 | 5.12 | 223 s |
+| four processes, NCCL fp32 wire (M90b-16c-deep7-fixed7) | 1,156.8 | 75.08 | 71.5 | 4.09 | 5.26 | 104 s |
+| four processes, NCCL bf16 wire (M90b-16c-deep7-fixed7-w16) | 1,146.5 | 66.53 | 63.6 | 3.47 | 5.07 | 104 s |
+
+The host between the programs is gone (host_ms 0.0, the drafter's program 0.8 to 1.4 ms faster, the load 2.1x
+faster with the four ranks slicing and compiling in parallel), and the step is 10.3 ms slower on the bf16 wire and
+18.8 on fp32: about 115 and 210 us a site over 90 sites (inferred from the step difference; the sites are not stamped
+in these runs). Their profiled step pays 70.6 us a site for the same NCCL bf16 ring kernel (90.0 on rank 3), so the
+extra is not NCCL's wire cost alone: the candidates are the epilogue, which the one-process form fuses into the sum
+kernel and this form runs as five to eight aten kernels a site at 128 rows x 5,120 x hc, the casts around the wire,
+and the NCCL settings their stack sets (algorithm, protocol, channel count); a stamped run with the sites bracketed
+separates them. Per the coordinator the speed arms of this form stop here: their sums cost what ours cost (8.7 ms a
+step against our 9.0 to 9.9), so NCCL is not where their step wins, and the four-process mechanics stay as the
+engine's path, judged on the host hop and the load time, not on the sum form. The wrong-text run before the fix
+(65.9 ms a step at 1.27 accepted) is not comparable: its streams ended early and its contexts stayed short.
+
+**The 16-stream step, theirs against ours, class by class (Nov 6; the close of the width story).** Their 16-slot
+step profiled on this node tonight (rank 0, median of 35 decode steps, their code prompts; prose beside in
+parentheses): wall 44.4 ms (32.9), three graph launches, 2,237 kernels, idle 0.47 ms (0.51). Ours: the one-process
+step at 128 rows (tree88, the per-rank timeline, the stamped verify span 44.7 to 45.8 and the harness's step 52.4 to
+56.3, all ranks the same at every class).
+
+| class | theirs, code (prose) | ours, code | reading |
+|---|---|---|---|
+| experts | 22.2 ms: W4A8 phase 1 14.3 at 358 us a launch + phase 2 6.8 at 169, 40 launches each, 527 us a layer (14.4) | expert node 19.6: 492 us a layer, of which the two GEMMs 393 at the HBM floor, ten small kernels about 60 | ours the better node by about 1.4 us a layer-step in 40 layers; their kernel is not the lever |
+| sums | 8.7: 90 NCCL bf16 ring all-reduces at 70.6 us mean on rank 0, 90.0 on rank 3, plus 2 all-gathers at 1,152 us for the head (6.6) | 9.0 to 9.9: 90 push sites at 85 us, the head's gather 0.83 | equal; neither step overlaps its sums |
+| attention | 3.7: unified MLA decode 45 us x 38, the indexer, merge, rotary (2.5) | core 5.1 + projections 3.2 | theirs ahead by about 4.6 ms: the indexer and MLA path in one kernel set |
+| dense fronts and other | 9.4 GEMM and quant + 0.9 norm and other (9.0 + 0.8) | router front 3.7 + hc front 2.2 + projections (counted above) + dense other 1.5 + engram 0.9 | about even once the projections are placed |
+| drafter | 3.7 span, two replays inside the step (3.6) | 4.4 to 4.8, a separate program | theirs ahead by about 1 ms, inside the step |
+| gaps | 0.47 idle, 5.7 eager span between replays overlapped by the drafter | 1.8 host between the programs + 1.5 in-graph gaps of 20 to 150 us | theirs ahead by about 2.8 ms |
+| step | 44.4 (32.9) | 52.4 to 56.3 | the sum of the rows above |
+
+Measured on both sides (their numbers from the trace's kernel classes, ours from the in-graph stamps and the
+kernel dumps); the attention and the gaps are the two classes where they lead by more than a millisecond, the
+drafter the third; the expert node and the sums are ours or equal. Their all-reduce reads 70 to 90 us a site at the
+same rows, and our NCCL form in four processes read more than that (above), so the sum form is closed as a lever in
+either direction; the attention path and the drafter inside the step are the next run's items.
+
 **The league table at the close of hero 15 (Nov 6, 10:30 UTC; two readings still running).** Their numbers are the
 vLLM fork measured on our four cards by the vllm-ref pod, the league method (one prompt a case, the decode window).
 One stream, prose: the five-row fp8-head drafter under the cost-model budget (plan b4h, programs 1 to 4, TP4

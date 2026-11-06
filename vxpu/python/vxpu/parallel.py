@@ -58,11 +58,22 @@ class World:
     """N ranks of one step. `devices` is the rank's device per rank."""
 
     def __init__(self, devices, scope=None):
-        self.size = len(devices)
-        self.devices = [torch.device(d) for d in devices]
+        from . import multiproc
+        self.multiproc = multiproc.active()
+        if self.multiproc:
+            # one process per rank (multiproc.py): this process holds one rank on its own card; the world's
+            # size is the ranks' count, and the exchanges are NCCL calls on this rank's communicator
+            multiproc.init()
+            self.size = multiproc.world_size()
+            self.local = [multiproc.rank()]
+            self.devices = [multiproc.device()]
+        else:
+            self.size = len(devices)
+            self.local = list(range(self.size))
+            self.devices = [torch.device(d) for d in devices]
         self.scope = scope  # a context manager factory every rank's thread enters (the engine's external scope)
         self._local = threading.local()
-        self._barrier = threading.Barrier(self.size)
+        self._barrier = threading.Barrier(len(self.devices))
         self._slots = [None] * self.size
         self._lock = threading.Lock()
         self._failed = None
@@ -83,6 +94,14 @@ class World:
         for dev in self.devices:
             if dev.type == "cuda":
                 torch.cuda.synchronize(dev)
+
+    def ranks(self):
+        """(rank, device) for every rank this process holds: all of them, or the one of a process per rank."""
+        return list(zip(self.local, self.devices))
+
+    def rank_graphs(self, graphs):
+        """(rank, (graph, device)) over the per-rank programs this process holds."""
+        return list(zip(self.local, zip(graphs, self.devices)))
 
     # ---- eager: threads and a barrier ----
 
@@ -109,8 +128,8 @@ class World:
         self._start_workers()
         for r, fn in enumerate(fns):
             self._inbox[r].put(fn)
-        results, errors = [None] * self.size, [None] * self.size
-        pending = set(range(self.size))
+        results, errors = [None] * len(self.devices), [None] * len(self.devices)
+        pending = set(range(len(self.devices)))
         deadline = time.perf_counter() + timeout
         while pending:
             try:
@@ -165,11 +184,11 @@ class World:
     def _start_workers(self):
         if getattr(self, "_workers", None):
             return
-        self._inbox = [queue.SimpleQueue() for _ in range(self.size)]
+        self._inbox = [queue.SimpleQueue() for _ in range(len(self.devices))]
         self._outbox = queue.SimpleQueue()
 
         def work(r):
-            self._local.rank = r
+            self._local.rank = self.local[r]
             while True:
                 fn = self._inbox[r].get()
                 if fn is None:
@@ -182,14 +201,16 @@ class World:
                     self._barrier.abort()
                     self._outbox.put((r, False, e))
 
-        self._workers = [threading.Thread(target=work, args=(r,), name=f"vxpu-rank-{r}", daemon=True)
-                         for r in range(self.size)]
+        self._workers = [threading.Thread(target=work, args=(r,), name=f"vxpu-rank-{self.local[r]}", daemon=True)
+                         for r in range(len(self.devices))]
         for t in self._workers:
             t.start()
 
     def barrier(self):
         """Every rank arrives before any leaves (the captures' preparation)."""
         if getattr(self, "solo", False):  # one rank stepping alone (engine._tp_prime): nothing to wait for
+            return
+        if self.multiproc:  # the other ranks are other processes; the step's collectives are the only meeting points
             return
         try:
             self._barrier.wait()
@@ -240,6 +261,9 @@ class World:
     def allreduce(self, x):
         if getattr(self, "solo", False):  # one rank stepping alone: its partial stands for the sum (wrong values, a warm-up)
             return x.clone()
+        if self.multiproc:  # the fp32 sum over NCCL, rounded once: the reference's class
+            from . import multiproc
+            return multiproc.allreduce_exact(x)
         parts = self._exchange(x)
         total = parts[0].to(x.device, torch.float32).clone()
         for p in parts[1:]:  # rank order on every rank: the totals agree bit for bit
@@ -251,6 +275,9 @@ class World:
             raise ValueError(f"parallel: allgather of {world_size} shards in a world of {self.size}")
         if getattr(self, "solo", False):
             return torch.cat([x] * self.size, dim=-1)
+        if self.multiproc:
+            from . import multiproc
+            return multiproc.allgather(x)
         parts = self._exchange(x)
         return torch.cat([p.to(x.device) for p in parts], dim=-1)
 
@@ -312,7 +339,7 @@ class Decode(torch.nn.Module):
             k = {n: (x.to(dev, non_blocking=False) if isinstance(x, torch.Tensor) else x) for n, x in kwargs.items()}
             return lambda: self.graphs[r](*a, **k)
 
-        fns = [on(r) for r in range(self.world.size)]
+        fns = [on(r) for r in range(len(self.world.devices))]
         t1 = time.perf_counter()
         if SINGLE_LAUNCHER and all(hasattr(g, "launch") for g in self.graphs):
             # one thread launches every rank's graph, then waits for all: no hand-off to four
@@ -387,7 +414,7 @@ class Decode(torch.nn.Module):
             a = [x.to(dev, non_blocking=False) if isinstance(x, torch.Tensor) else x for x in args]
             k = {n: (x.to(dev, non_blocking=False) if isinstance(x, torch.Tensor) else x) for n, x in kwargs.items()}
             moved.append((a, k))
-        stamps = [None] * self.world.size  # per rank: the launch call's start and end on the host (the trace)
+        stamps = [None] * len(self.world.devices)  # per rank: the launch call's start and end on the host (the trace)
 
         def launch(r, dev):
             t0 = time.perf_counter()
