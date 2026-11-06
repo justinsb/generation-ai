@@ -7272,3 +7272,18 @@ combinations, paid once each; the key log stays as the instrument. The load-time
 cold n-gram table's populate runs at 1.3 MB/s under MADV_RANDOM with readahead off (1,125 s cold against 0.9 s warm),
 to be fixed by a MADV_WILLNEED or a sequential fadvise before the populate.
 
+**Two results of the last hour (Nov 6).** The fixed policy with a draft smaller than the drafter's block is a bug:
+the fixed depth-5 and depth-6 arms on the block-7 export (plans f5flat and f6flat) raised in engine._tp_spec_half at
+the acceptance (line 2131: torch.where over a mask of width 5 or 6 against drafts of width 7); the fixed depth-7 arm
+ran because 7 equals the block. Not fixed tonight; the depth curve at 16 streams code stands at 3.4 issued (block 5:
+1,538.9 at 39.3 ms), 5.25 (f96, 1,553.8 at 49.1), 5.8 (the cost model, 1,533.9 at 51.7) and 7 (1,370.9 at 55.4). An
+NCCL sum form in the step: the sum sites are collective nodes outside the packages (no digest moves) and the site's
+epilogue exists as plain ops, but torch.cuda.nccl.all_reduce is the single-process multi-device path that issues every
+device's operation in one group call on one communicator, which cannot be split across our four per-rank graphs
+(captured one rank at a time in solo mode, replayed by four threads); issued from one rank's capture it would block the
+other devices' eager streams on a kernel that exists only in the graph. The form that fits is one communicator per
+rank in one process (ncclGetUniqueId, four ncclCommInitRank in a group, each rank's ncclAllReduce on its own stream
+and thread), which torch exposes only through torch.distributed's one process per rank: a ctypes binding of libnccl,
+the sum-site form and a solo-mode bypass for the prime, about three hours before a first measurement; a hero 16
+build, not a knob.
+
