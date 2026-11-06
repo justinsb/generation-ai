@@ -7120,3 +7120,17 @@ compare in the prologue). The gate/up tile sweeps on the arm: stages 4 / 5 lose 
 (116.5 repeated): the winning tile is narrow and shallow, more and shorter programs rather than more bytes in flight
 per program.
 
+**The first-pair down kernel with paired singletons: a closed negative (Nov 6).** The singleton experts of the
+first-pair down kernel paired two a program as the direct down kernel pairs pairs (VXPU_FP4_FIRST_PAIR2: the rank
+among the singleton first pairs from PP vector passes over the pair list in the prologue, the partner's arrival wait
+and counter zeroing beside the tile's). Without PDL it compiles and is bit-identical, and reads 168.3 us a layer
+against the direct form's 148.6 and the arm's 126.6 on the same 8 samples: the first-pair down body loses on the
+experts with several rows, not on the singletons, because its tile does the SwiGLU, the routing weight and the
+per-32 requantization on a [16, BK] tile every K step where the per-pair kernel does one row, and that costs more
+than the w2 bytes it saves. Under FP4_PDL 2 the kernel does not compile: Triton's layout pass
+(TritonGPURemoveLayoutConversions) fails, and the bisect places it in the partner's wait block (the one-pair body in
+place of the two-pair call fails the same way, the scan removed fails the same way, PDL off compiles). The knob stays
+in the code, off. The first-pair form's defaults now select the measured arm (the direct down kernel, the gather
+body), so VXPU_FP4_DIRECT_FIRST=1 alone is the arm; the gate/up K step 128 (108.0 against 116.5 us) is the one
+further lever that measured, a table knob for the entries.
+
