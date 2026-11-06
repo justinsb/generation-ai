@@ -7235,3 +7235,18 @@ per-row cost the full depth pays less per millisecond than the cost model's 5.8 
 code gap is the step at the same 128 rows: 55.4 ms against their 43 to 45. The skew trace, the per-rank timeline and
 the two fix arms (the lone cross-socket card as rank 3; the two-part push with the bf16 wire) run on that program.
 
+**The step at 128 rows, per rank (Nov 6, pod C, tree88, plan b7h).** The skew trace at the hc sum sites: the four
+ranks arrive within 5 to 20 us of one another (clocks calibrated) and wait 1 to 20 us (medians 14.1 / 0.8 / 2.1 / 4.2
+us for ranks 0 to 3, rank 0 the first to arrive): the lone cross-socket card is not late, and the hc sites are not
+waiting on a rank; their 85 us a site at 128 rows is the exchange itself. The per-rank timeline (every rank's graph
+stamped): the ranks are the same at every class and every node of a layer, stamped wall 44.7 to 45.8 ms, the expert
+node 19.6 ms (492 us a layer), the sum sites 9.0 to 9.9 (85 us a site), attention core 5.1, router front 3.7, the
+island 12.9 overlapped; the harness's step 52.4 ms. So our verify program's device span equals their whole step (43
+to 45 ms) and the 7 ms outside the graph are the drafter's separate program (4.8 ms a call at 112 rows, its own four
+rank graphs and sums) plus about 2.6 ms of host between the two programs; their drafter runs inside their step. Fix
+arms: the lone card as rank 3 loses (the expert node 544 us a layer on every rank, wall +2.4 ms); the two-part push
+with the bf16 wire is a wash (+0.5 ms). Items for the next run: the drafter inside the step or launched without the
+host hop (the one-pass block-7 drafter); the sum form at width (85 us a site); the expert node's 190 us a layer above
+its kernels, whose home is neither the island, nor the sums, nor a slow rank (a per-kernel table inside one node span
+is the next instrument).
+
