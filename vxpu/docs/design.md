@@ -7512,3 +7512,42 @@ in the code, off. The first-pair form's defaults now select the measured arm (th
 body), so VXPU_FP4_DIRECT_FIRST=1 alone is the arm; the gate/up K step 128 (108.0 against 116.5 us) is the one
 further lever that measured, a table knob for the entries.
 
+**The width routing, and the expert kernel at width (Nov 6, pod C).** The 16-stream trace (tree50, the budget plan
+over the flats of 48, 64 and 80 rows, 78 steps at 36.9 ms median) ran every step on the 80-row flat program: 480
+pairs a layer over 99.8 distinct experts (4.8 pairs an expert, 63 experts with two or more rows, 79 percent of the
+pairs could share a tile, up to 69 rows on one). At that width the pair count is above FP4_DIRECT_MAX (48), so the
+direct path and the first-pair form inside it are not taken and the GEMM form runs; on the TP4 slices it reads the
+472 MB of distinct bytes in 292 to 300 us a layer, 1.58 to 1.62 TB/s, the card's HBM floor: the expert kernel at
+width is byte-bound and the per-expert form has nothing to add there; its domain is the one-stream shapes (at most
+48 pairs). The finding at width is the placement: the EP4 shape the prose entries run (a card's quarter of whole
+experts, here 120 held pairs over 26.4 distinct) costs 431 to 439 us a layer for the same bytes, 1.13 to 1.16 TB/s,
+against the TP4 slices' 300: about 135 us a layer, 5.4 ms of the 35 ms 16-stream prose step (measured on the bench,
+inferred to the step) if the prose entries ran the experts as TP4 slices as the code entries do; a class (the K-split
+partials) the code entries already carry, and a plan choice. Both forms bit-identical in every pair.
+
+**The 8-stream prose placement: the slices win with the same text (Nov 6, pod C).** Every 8-stream prose entry
+since tree24 ran the EP4 placement (a card's quarter of whole experts) while the code entries ran TP4 slices, after
+a tree24 pair (31.88 against 33.24 ms a step but 667.5 against 676.3 tok/s: accepted a step 1.96 to 1.89, a class
+effect on the sampled text) and nothing re-measured it after the wire, scatter-sum and padding changes. The direct
+test: W48-8p-bf16f's exact configuration (tree48, bf16 wire, the sb plan, the four per-length verifies and eight flats
+of the b8 export) plus VXPU_EXPERT_TP=4 VXPU_FP4_DN_KS=1, 8 streams prose on the league harness (W48-8p-tp4-C):
+866.6 tok/s at 24.48 ms median (23.76 mean), 1.73 accepted a step a row, text identical to the EP4 entry's (gate
+passed), against 798.7 at 26.03 (25.46) and 1.73: 8.5 percent more throughput from a step 1.7 ms shorter, all of it
+in the expert node, and the entry from 96.6 to 104.8 percent of the published 827. The load built nothing (D's
+tree48 packages copied to C's cache); the record carries EXPERT_TP_env 4. Memory while decoding 94.0 / 86.2 / 86.2 /
+86.3 GB (tree48 has no cuda:0 release). The same-tree EP4 control on C follows. The lesson for the planner: a
+placement choice measured once on an old tree stayed the default for twelve trees; the planner re-measures its
+choices when the step changes.
+
+**The 8-stream prose placement, the same-tree control (Nov 6, pod C).** W48-8p-bf16f-C, the EP4 configuration
+rerun on C: 829.6 tok/s at 26.24 ms median (25.48 mean), 1.83 accepted a step a row, its text departing from D's
+W48-8p-bf16f at char 291 while the step time matches D to 0.02 ms (25.48 against 25.46 mean): the pods agree on the
+step, and the slots policy's picks move the text and the acceptance between runs, as the 16-stream rectangle repeats
+did. On one pod the slices read 866.6 at 23.76 against the quarter's 829.6 at 25.48: 4.5 percent more throughput
+from a step 1.7 ms shorter, the measured part; against D's 798.7 the 8.5 percent includes the policy's draw. The
+depth at 16 streams is capped by the export (a block-5 drafter, step_tokens 5: four drafts a stream, the deepest
+flat 80 = 16 x 5) and the plan's draft 4; the policy "slots" gives every live row its token row and fills the rest
+of the smallest flat program that fits with the drafts of the highest survival across streams, so it issued 3.41 of
+4 at 97 percent conditional acceptance on code: the cap binds, not the policy, and a deeper step needs a block-7
+b16 export with flats at 96 and 112 rows.
+
