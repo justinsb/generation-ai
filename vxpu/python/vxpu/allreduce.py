@@ -523,6 +523,18 @@ if triton is not None:
                 tl.store(y_ptr + (t * HC + h) * d + col, y.to(y_ptr.dtype.element_ty), mask=m)
 
     @triton.jit
+    def _hc_mix_total_kernel(total_ptr, out_ptr, res_ptr, post_ptr, comb_ptr, n, d, HC: tl.constexpr, BLOCK: tl.constexpr,
+                             ROWBLOCK: tl.constexpr = False):
+        """The mix alone over an already summed total (a process per rank, hero run 15: NCCL's output buffer,
+        fp32 or the bf16 wire's bf16): the total rounded to the stream's dtype as the sum kernels round it, then
+        _hc_mix; one kernel where the reference epilogue launched five to eight."""
+        pid = tl.program_id(0)
+        offs = pid.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+        m = offs < n
+        total = tl.load(total_ptr + offs, mask=m, other=0).to(out_ptr.dtype.element_ty).to(tl.float32)
+        _hc_mix(total, offs, m, out_ptr, res_ptr, post_ptr, comb_ptr, d, HC, ROWBLOCK, pid.to(tl.int64) * BLOCK)
+
+    @triton.jit
     def _rs_reduce_hc_kernel(p0, p1, p2, p3, y_ptr, res_ptr, post_ptr, comb_ptr, g0, g1, g2, S, n_mine, base, d,
                              fa_ptr, counter_ptr, fb0, fb1, fb2, PEERS: tl.constexpr, HC: tl.constexpr,
                              BLOCK: tl.constexpr, ROUND: tl.constexpr, ROWBLOCK: tl.constexpr = False, trace_ptr=None):
@@ -981,6 +993,24 @@ def allreduce_oneshot_hc(x, site, residual, post, comb, traced=False):
                      post.contiguous().view(-1), comb.contiguous().view(-1), n, d, c.flags[rank][site, 0],
                      c.counters[rank][site, 1:2], c.trace[rank][site], PEERS=len(peers), HC=hc, BLOCK=block,
                      ROUND=pd != x.dtype, ROWBLOCK=_rowblock(d, block))
+    return out
+
+
+def mix_total(total, residual, post, comb):
+    """The fused epilogue over a summed partial: total [.., d] (fp32, or bf16 off the bf16 wire) mixed with
+    residual [.., HC, d] through post [.., HC] and comb [.., HC, HC] into the new stream [.., HC, d] in
+    residual's dtype, one kernel (a process per rank sums over NCCL and mixes here; the one-process forms mix
+    inside their sum kernels)."""
+    tc = total.contiguous()
+    flat = tc.view(-1)
+    n = flat.numel()
+    d = total.shape[-1]
+    hc = residual.shape[-2]
+    out = torch.empty(tuple(total.shape[:-1]) + (hc, d), dtype=residual.dtype, device=total.device)
+    block = min(block_elems(), int(os.environ.get("VXPU_ALLREDUCE_HC_BLOCK", "512")))
+    grid = (triton.cdiv(n, block),)
+    _hc_mix_total_kernel[grid](flat, out.view(-1), residual.contiguous().view(-1), post.contiguous().view(-1),
+                               comb.contiguous().view(-1), n, d, HC=hc, BLOCK=block, ROWBLOCK=_rowblock(d, block))
     return out
 
 
