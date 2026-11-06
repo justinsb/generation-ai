@@ -1102,9 +1102,20 @@ class StepGraph(torch.nn.Module):
         # the rank's first vocabulary index is a constant of the op's call inside the segment (the split
         # hands a node only its tensor inputs), read off the segment's graph as _gemv_sum reads its op
         start = args_[2] if len(args_) > 2 else self._embed_start(node.name)
-        if self.world.size == 1 or self.world.multiproc:
-            # a world of one, or a process per rank (multiproc.py): this rank's rows of the table, zero for the ids
-            # it does not own, summed over NCCL (World.embed_rows); the peers' shards are in other processes
+        if self.world.multiproc:
+            # a process per rank (multiproc.py): this rank's rows of the table, zero for the ids it does not own,
+            # summed over NCCL; the peers' shards are in other processes. Not World.embed_rows: the prime captures
+            # in solo mode, where its sum is a clone, and the captured graph is the one replayed (the first
+            # four-process run read ". The code. The code." for every stream: the other ranks' rows were zero)
+            import torch.nn.functional as F
+            from . import multiproc
+            with torch.cuda.stream(stream):
+                sh = shard.contiguous()
+                local = ids - start
+                mask = (local < 0) | (local >= sh.shape[0])
+                y = F.embedding(local.masked_fill(mask, 0), sh).masked_fill(mask.unsqueeze(-1), 0)
+                return multiproc.allreduce_exact(y).to(sh.dtype)
+        if self.world.size == 1:
             with torch.cuda.stream(stream):
                 return self.world.embed_rows(ids, shard.contiguous(), start)
         # the shards every rank shared before the capture (_prepare_collectives): the prime captures each

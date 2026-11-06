@@ -178,8 +178,15 @@ def allgather(x):
     return buf.movedim(0, xc.dim() - 1).reshape(tuple(xc.shape[:-1]) + (_WORLD * xc.shape[-1],))
 
 
+WIRE = os.environ.get("VXPU_MP_WIRE", "fp32")  # "bf16": the partials cross as bf16 (the one-process bf16 wire class)
+
+
 def allreduce_exact(x):
-    """x summed as fp32 across the ranks and rounded back to x's dtype: the reference's class."""
+    """x summed across the ranks: as fp32, rounded once to x's dtype (the reference's class), or under
+    VXPU_MP_WIRE=bf16 as bf16 on the wire (NCCL reduces in fp32 and stores bf16 at each hop: half the bytes
+    a site, the one-process bf16 wire's class, not bit-identical to it; a planner choice, not the default)."""
+    if WIRE == "bf16":
+        return allreduce(x.to(torch.bfloat16)).to(x.dtype)
     if x.dtype == torch.float32:
         return allreduce(x)
     return allreduce(x.float()).to(x.dtype)
