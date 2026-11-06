@@ -7643,3 +7643,19 @@ moves on rank 0: 7 -> 6 x11, 6 -> 5 x10, 5 -> 4 x7, 4 -> 5 x4, 7 -> 5 x2, 4 -> 3
 profile (0.79 at position 7 for every row), and the rule ratchets down because accepted is bounded by the depth. Their
 6.22 drafts a stream a step pays where a few streams carry the seventh draft and most do not; ours is flat across
 rows. Closed for this model and width.
+
+**The per-request controller's form, and the drafter comparison underneath (Nov 6, 22:50 UTC).** F98b is booked as
+the result. The depth log shows the ratchet: a row's mean accepted is capped by its depth, so floor(mean + 1.5) is at
+most the depth and the raise condition (a window at or above the next depth) almost never fires; rows walked 7 -> 6 ->
+5 -> 4 -> 3 -> 2. Their controller cannot work that way either: its "up by one per window" has to be an unconditional
+probe (raise every window, lower at once when the target falls). Not rerun tonight: with our acceptance per position
+the probe would oscillate between 6 and 7, and the flats quantize at 112 rows (every row at 6) and 128 (any row at 7),
+so there is nothing between. The planner's note: a per-request depth needs the probe form and a per-row program
+cost that is not flat. The finding underneath: their per-position list from /metrics is survival (accepted at
+position i over drafted at i), ours above is the conditional rate (accepted at i given accepted at i - 1). Ours
+multiplied out at fixed 7 (F93c): 0.948, 0.893, 0.820, 0.751, 0.683, 0.586, 0.463, sum 5.14 tokens of drafts a step;
+theirs at 16 slots code: reaching position 6 in 73 percent of stream-steps against our 59, sum 5.61 at a full 7, and
+5.04 taken after their trim to 6.22 drafts a stream a step. Their drafter is better at depth on code by about 9
+percent in tokens a step, and that with their 12 fewer rows a step (about 116 against our 128 at 0.2 ms a row) is
+most of the league gap at 16 streams; their step and ours now cost the same per row (sums 79 us a site in both, the
+expert node at the same bytes).
