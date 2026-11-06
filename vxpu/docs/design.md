@@ -7594,3 +7594,15 @@ ms in the harness's warm-up steps and 49.7 in the wave, in both forms. The warm-
 prompt, so the streams route identically and the expert node reads a fraction of the distinct slices (the GEMM
 form's bytes scale with distinct experts; gate/up 191 us in the short-context profile against 292 to 320 at full
 diversity), and the contexts are 30 tokens against 400; the wave profile (C165) carries the per-kernel table.
+
+**The wave's kernels (Nov 6, 22:12 UTC): the profiler over a full 400-token generation, four processes against one.**
+Inside the expert node's bracket at the league's position: four processes 545 us a layer covered (idle 8; gate/up
+348, down 158, gemv_rows 24, dual GEMV 19, schedule 10, swiglu rows 10, reduce 8), one process 521 (idle 2; 340, 153,
+26, 22, 9, 9, 8): 24 us a layer between the forms, about 1 ms a step, no kernel grown; the "residue" of the stamps was
+a comparison across runs and brackets. The warm-up against the wave on the same program, now in kernels: gate/up
+191 -> 348 us and down 83 -> 158, 9.8 ms a step of the 13, the rest in the attention core and the gathers, no idle
+either place: the warm-up's 16 identical streams route together and the node reads a fraction of its slices; the
+wave's 16 prompts route apart and the node reads its 564 MB at 506 us a layer, 78 percent of the byte floor. Their
+step pays the same bytes (527 us a layer in their expert kernels), so the expert node is not where the steps differ.
+The one-process step under the profiler reads 61.8 against 56.2 before it (2.1 million events for the push form's
+small kernels against 0.55 million for NCCL's); the four-process 53.6 against 53.2.
