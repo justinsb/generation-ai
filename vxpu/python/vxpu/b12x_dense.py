@@ -234,19 +234,24 @@ def prepare_everything(rows, device):
         return
     _prepared_everything = True
     bfl = _modules()[0]
-    shapes = set()
+    caps_of = {}  # shape -> every capacity any load recorded for it (sites.txt), plus this plan's needed set
     try:
         for line in open(os.path.join(CACHE_DIR, "sites.txt")):
-            K, N, _cap = (int(v) for v in line.split())
-            shapes.add((K, N))
+            K, N, cap = (int(v) for v in line.split())
+            caps_of.setdefault((K, N), set()).add(cap)
     except OSError:
         pass
-    caps = needed_capacities(rows)
+    needed = set(needed_capacities(rows))
+    for shape in caps_of:
+        caps_of[shape] |= needed
+    shapes = set(caps_of)
+    caps = sorted({c for v in caps_of.values() for c in v})
     started = time.perf_counter()
     count = 0
     for d in range(torch.cuda.device_count()):
         dev = torch.device("cuda", d)
         for K, N in sorted(shapes):
+            caps = sorted(caps_of[(K, N)])
             if all((d, K, N, cap) in _plans for cap in caps):
                 continue
             with torch.cuda.device(dev):
@@ -259,8 +264,9 @@ def prepare_everything(rows, device):
                         count += 1
                 del packed, w, sc
                 torch.cuda.empty_cache()
-    print(f"[vxpu] b12x dense: {count} plans prepared on the main thread for {len(shapes)} recorded shapes x capacities "
-          f"{caps} on {torch.cuda.device_count()} devices ({time.perf_counter() - started:.1f}s)", flush=True)
+    print(f"[vxpu] b12x dense: {count} plans prepared on the main thread for {len(shapes)} recorded shapes, capacities "
+          f"{sorted({c for v in caps_of.values() for c in v})} (sites.txt's for each shape plus {sorted(needed)} needed here) "
+          f"on {torch.cuda.device_count()} devices ({time.perf_counter() - started:.1f}s)", flush=True)
 
 
 def run(x, weight, scale):
