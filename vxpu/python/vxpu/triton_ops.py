@@ -3033,7 +3033,8 @@ if triton is not None:
                                  w1_ptr, s1_ptr, w3_ptr, s3_ptr, g_ptr, u_ptr, I, K, TOPK, PAIRS,
                                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, NATIVE: tl.constexpr,
                                  TMA: tl.constexpr, KS: tl.constexpr = 1, arrive_ptr=None, PDL: tl.constexpr = False,
-                                 ARRIVE: tl.constexpr = False):
+                                 ARRIVE: tl.constexpr = False, h_ptr=None, wt_ptr=None, limit=0.0,
+                                 EPI: tl.constexpr = False):
         """The expert GEMM form of the grouped gate/up kernel (hero run 15): one block of up to BM
         pairs that chose the same expert, BN of its rows, gate or up by the third grid axis (one
         tensor-core dot per weight load, as the direct kernel found faster than both in one
@@ -3043,55 +3044,96 @@ if triton is not None:
         expert bytes are its distinct experts' and the pairs beyond the first cost only their rows
         of the dot. The grouped kernel it replaces above FP4_GEMM_MIN_PAIRS loaded the tile with
         plain loads and both matrices in one program (60% of the read peak at 240 pairs; this form
-        measured per the sweep in dev/hero/fp4-gemm-rtx6000.json)."""
+        measured per the sweep in dev/hero/fp4-gemm-rtx6000.json).
+
+        EPI (FP4_FUSE_EPI bit 2, Nov 6): gate and up in one program (two accumulators, both weight
+        tiles per K step, x loaded once for both), and the SwiGLU kernel's arithmetic as the
+        epilogue: the two sums rounded to bf16 as the module rounds them, the clamps, the routing
+        weight times silu(gate) times up rounded to bf16, quantized per 32 along I (BN a multiple of
+        32, so the tile holds whole blocks) and stored as bf16 h, the down kernel's input; g and u
+        are never stored. The same bits as _swiglu_quant_kernel over the separate programs' g and
+        u (its reads come back as the fp32 values of the same bf16)."""
         if PDL:  # the down kernel is a dependent launch (hero run 15, the GEMM form's equivalent of the direct kernels')
             _gdc_launch_dependents()
         slot, pairs, live_m, cnt = _grouped_block(order_ptr, blk_slot_ptr, blk_first_ptr, blk_count_ptr,
                                                   tl.program_id(0), BM)
         if cnt <= 0:
             return
-        # the third grid axis: gate or up, times the K split (KS slices of K, each program one slice,
-        # its fp32 partial in slab ks of g or u, which the SwiGLU kernel sums): at two to five rows a
-        # card's few blocks give few programs otherwise, each a long latency-bound loop (hero run 15)
-        which = tl.program_id(2) % 2
-        ks = tl.program_id(2) // 2
-        k_lo = ks * (K // KS)
-        slab = ks.to(tl.int64) * PAIRS * I
         rows = tl.program_id(1) * BN + tl.arange(0, BN)
         live_n = rows < I
         bank_rows = slot * I + rows
         tok = (pairs // TOPK).to(tl.int64)
-        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        mask = live_m[:, None] & live_n[None, :]
         if TMA:
             base = (slot * I + tl.program_id(1) * BN).to(tl.int32)
-        for k0 in range(k_lo, k_lo + K // KS, BK):
-            x = tl.load(x_ptr + tok[:, None] * K + k0 + tl.arange(0, BK)[None, :], mask=live_m[:, None], other=0.0)
-            if TMA:
-                if which == 0:
+        if EPI:
+            acc = tl.zeros((BM, BN), dtype=tl.float32)
+            acc_u = tl.zeros((BM, BN), dtype=tl.float32)
+            for k0 in range(0, K, BK):
+                x = tl.load(x_ptr + tok[:, None] * K + k0 + tl.arange(0, BK)[None, :], mask=live_m[:, None], other=0.0)
+                if TMA:
                     b = w1_ptr.load([base, k0 // 2])
                     e = _fp4_scales(s1_ptr, bank_rows, live_n, k0, K // 32, BN, BK)
-                else:
+                    acc = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc)
                     b = w3_ptr.load([base, k0 // 2])
                     e = _fp4_scales(s3_ptr, bank_rows, live_n, k0, K // 32, BN, BK)
-                acc = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc)
-            elif NATIVE:
-                if which == 0:
+                    acc_u = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc_u)
+                elif NATIVE:
                     b, e = _fp4_raw(w1_ptr, s1_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
-                else:
+                    acc = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc)
                     b, e = _fp4_raw(w3_ptr, s3_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
-                acc = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc)
-            else:
-                if which == 0:
-                    t = _fp4_tile(w1_ptr, s1_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
+                    acc_u = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc_u)
                 else:
+                    t = _fp4_tile(w1_ptr, s1_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
+                    acc = tl.dot(x, tl.trans(t), acc)
                     t = _fp4_tile(w3_ptr, s3_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
-                acc = tl.dot(x, tl.trans(t), acc)
-        out = slab + pairs.to(tl.int64)[:, None] * I + rows[None, :]
-        mask = live_m[:, None] & live_n[None, :]
-        if which == 0:
-            tl.store(g_ptr + out, acc.to(g_ptr.dtype.element_ty), mask=mask)
+                    acc_u = tl.dot(x, tl.trans(t), acc_u)
+            g = acc.to(tl.bfloat16).to(tl.float32)  # rounded as the module rounds gate and up
+            u = acc_u.to(tl.bfloat16).to(tl.float32)
+            lim = limit.to(tl.float32)
+            if lim > 0:
+                u = tl.minimum(tl.maximum(u, -lim), lim)
+                g = tl.minimum(g, lim)
+            w = tl.load(wt_ptr + pairs, mask=live_m, other=0.0).to(tl.float32)
+            hf = (w[:, None] * ((g * tl.sigmoid(g)) * u)).to(tl.bfloat16).to(tl.float32)
+            h = _quant_tile(hf, BM, BN)
+            tl.store(h_ptr + pairs.to(tl.int64)[:, None] * I + rows[None, :], h.to(tl.bfloat16), mask=mask)
         else:
-            tl.store(u_ptr + out, acc.to(u_ptr.dtype.element_ty), mask=mask)
+            # the third grid axis: gate or up, times the K split (KS slices of K, each program one slice,
+            # its fp32 partial in slab ks of g or u, which the SwiGLU kernel sums): at two to five rows a
+            # card's few blocks give few programs otherwise, each a long latency-bound loop (hero run 15)
+            which = tl.program_id(2) % 2
+            ks = tl.program_id(2) // 2
+            k_lo = ks * (K // KS)
+            slab = ks.to(tl.int64) * PAIRS * I
+            acc = tl.zeros((BM, BN), dtype=tl.float32)
+            for k0 in range(k_lo, k_lo + K // KS, BK):
+                x = tl.load(x_ptr + tok[:, None] * K + k0 + tl.arange(0, BK)[None, :], mask=live_m[:, None], other=0.0)
+                if TMA:
+                    if which == 0:
+                        b = w1_ptr.load([base, k0 // 2])
+                        e = _fp4_scales(s1_ptr, bank_rows, live_n, k0, K // 32, BN, BK)
+                    else:
+                        b = w3_ptr.load([base, k0 // 2])
+                        e = _fp4_scales(s3_ptr, bank_rows, live_n, k0, K // 32, BN, BK)
+                    acc = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc)
+                elif NATIVE:
+                    if which == 0:
+                        b, e = _fp4_raw(w1_ptr, s1_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
+                    else:
+                        b, e = _fp4_raw(w3_ptr, s3_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
+                    acc = tl.dot_scaled(x, None, "bf16", tl.trans(b), e, "e2m1", acc)
+                else:
+                    if which == 0:
+                        t = _fp4_tile(w1_ptr, s1_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
+                    else:
+                        t = _fp4_tile(w3_ptr, s3_ptr, bank_rows, live_n, k0, K // 2, K // 32, BN, BK)
+                    acc = tl.dot(x, tl.trans(t), acc)
+            out = slab + pairs.to(tl.int64)[:, None] * I + rows[None, :]
+            if which == 0:
+                tl.store(g_ptr + out, acc.to(g_ptr.dtype.element_ty), mask=mask)
+            else:
+                tl.store(u_ptr + out, acc.to(u_ptr.dtype.element_ty), mask=mask)
         if ARRIVE:  # this block's down programs wait for 2 x NT1 x KS of these on the block's counter
             tl.debug_barrier()
             tl.atomic_add(arrive_ptr + tl.program_id(0), 1, sem="release")
@@ -4570,10 +4612,11 @@ def fp4_experts_decode(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limi
 def _fp4_fuse(indices, per_pair, KS, KS2, bn1, bits=None):
     """The GEMM form's fusions in effect for a call (FP4_FUSE_EPI's bits, each only where its
     conditions hold): lookup (bit 1: the schedule's kernel looks the slots up; needs the expert
-    ids). Returns (lookup,)."""
+    ids), epi (bit 2: the SwiGLU and quantization as the gate/up kernel's epilogue; needs an
+    unsplit K and a row tile of whole 32-blocks). Returns (lookup, epi)."""
     bits = int(FP4_FUSE_EPI) if bits is None else int(bits)
     ids = indices is not None
-    return (bool(bits & 1) and ids,)
+    return bool(bits & 1) and ids, bool(bits & 2) and KS == 1 and bn1 % 32 == 0
 
 
 def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit, per_pair, indices, start, native):
@@ -4597,7 +4640,7 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
     # replies itself (the combine gone), and runs as a dependent launch on per-block arrivals (FP4_PDL)
     fold = FP4_GEMM_FOLD and indices is not None and KS2 == 1
     # the fusions (FP4_FUSE_EPI, hero run 15, Nov 6); the fold is the earlier form and takes none of them
-    lookup = _fp4_fuse(indices, per_pair, KS, KS2, bn1)[0] if not fold else True
+    lookup, epi = _fp4_fuse(indices, per_pair, KS, KS2, bn1) if not fold else (True, False)
     mode = _fp4_pdl_mode() if fold else 0
     pdl, wait = mode > 0, mode == 2
     idx = indices.contiguous().view(-1) if indices is not None else None
@@ -4613,13 +4656,17 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
         order, blk_slot, blk_first, blk_count, blocks = _grouped_schedule(slot, S, bm)
     if K % KS or I % KS2:
         raise ValueError(f"fp4 experts (GEMM form): K splits {KS} and {KS2} do not divide K={K}, I={I}")
-    if KS > 1:
+    h = torch.empty(pairs, I, dtype=torch.bfloat16, device=dev)
+    if epi:  # the gate/up kernel writes h itself: no g and u
+        g = u = h
+    elif KS > 1:
         g = torch.empty(KS, pairs, I, dtype=torch.float32, device=dev)
         u = torch.empty(KS, pairs, I, dtype=torch.float32, device=dev)
     else:
         g = torch.empty(pairs, I, dtype=torch.bfloat16, device=dev)
         u = torch.empty(pairs, I, dtype=torch.bfloat16, device=dev)
-    h = g if fold else torch.empty(pairs, I, dtype=torch.bfloat16, device=dev)  # with the fold h is never stored
+    if fold:
+        h = g  # with the fold h is never stored
     # 0 for the pairs not held here (with a split, one slab per slice)
     d = torch.zeros((KS2, pairs, K) if KS2 > 1 else (pairs, K), dtype=torch.float32, device=dev)
     _keep(g, u, h, d)
@@ -4642,13 +4689,14 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
         else:
             d1, d3, d2 = w1, w3, w2
         nt1 = triton.cdiv(I, bn1)
-        _fp4_gemm_gate_up_kernel[(blocks, nt1, 2 * KS)](
+        _fp4_gemm_gate_up_kernel[(blocks, nt1, 1 if epi else 2 * KS)](
             x, order, blk_slot, blk_first, blk_count, d1, s1.view(torch.uint8), d3, s3.view(torch.uint8), g, u,
             I, K, topk, pairs, BM=bm, BN=bn1, BK=bk1, NATIVE=native, TMA=tma, KS=KS, arrive_ptr=arrive, PDL=pdl,
-            ARRIVE=wait, num_warps=warps1, num_stages=stages1)
+            ARRIVE=wait, h_ptr=h, wt_ptr=wt, limit=float(swiglu_limit), EPI=epi, num_warps=warps1, num_stages=stages1)
         if not fold:
-            _swiglu_quant_kernel[(triton.cdiv(I // 32, 16), pairs)](g, u, wt, slot, h, I, float(swiglu_limit), G=16, KS=KS,
-                                                                  PAIRS=pairs)
+            if not epi:
+                _swiglu_quant_kernel[(triton.cdiv(I // 32, 16), pairs)](g, u, wt, slot, h, I, float(swiglu_limit), G=16,
+                                                                      KS=KS, PAIRS=pairs)
             _fp4_gemm_down_kernel[(blocks, nt, KS2)](
                 h, order, blk_slot, blk_first, blk_count, d2, s2.view(torch.uint8), d, K, I, pairs, BM=bm, BN=bn2, BK=bk2,
                 NATIVE=native, TMA=tma, KS2=KS2, num_warps=warps2, num_stages=stages2)
