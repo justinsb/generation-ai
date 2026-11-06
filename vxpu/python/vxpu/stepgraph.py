@@ -101,7 +101,7 @@ TWO_PART_SUM = os.environ.get("VXPU_TWO_PART_SUM", "0") == "1"
 # on each node's stream at the node's start and end (triton_ops.phase_stamp), eight steps round-robin, read after the
 # run by StepGraph.phase_table(); about 2 us a stamp, two a node. A CUPTI table is for compute kernels only: wait,
 # skew and launch claims come from stamps like these or from host event timing with the profiler off.
-PHASE_TRACE = os.environ.get("VXPU_PHASE_TRACE") == "1"
+PHASE_TRACE = os.environ.get("VXPU_PHASE_TRACE") in ("1", "all")  # "all": every rank's graph stamps, not only the first GPU's
 PHASE_STEPS = 8
 # The step feeds itself (hero run 15, the sampling hop): with VXPU_GRAPH_TOKEN=1 a plain decode step's graph
 # writes its greedy choice into its own input_ids and advances its cache_position at the end, so the next
@@ -1419,7 +1419,7 @@ class StepGraph(torch.nn.Module):
                 elif d in in_flags:
                     driver.wait_value(stream, in_flags[d].data_ptr(), 1)
                     driver.write_value(stream, in_flags[d].data_ptr(), 0)
-                stamping = PHASE_TRACE and d == devs[0]
+                stamping = PHASE_TRACE and (d == devs[0] or os.environ.get("VXPU_PHASE_TRACE") == "all")
                 if stamping:
                     mine = [n for n in graph.nodes if node_dev[n.name] == d]
                     self._phase_nodes = [(n.name, n.kind, list(n.layers or []), self._node_ops(n)) for n in mine]

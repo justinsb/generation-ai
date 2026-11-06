@@ -7187,3 +7187,23 @@ card's bandwidth and SMs; the A/B is the same trace with every node on one strea
 island's own cost is an item either way: one shared FFN at 80 rows in 276 to 305 us is about 10x its byte floor (35
 MB) and far above its compute, a GEMV-form kernel at width.
 
+**Inside the 16-stream code step's expert node (Nov 6, pod C).** The A/B with every node on one stream
+(VXPU_PARALLEL_BRANCHES=0): the expert node 20.93 ms a step (469 us a layer) against 21.58 beside the island, and the
+shared expert alone 1.77 ms a step, 44 us a layer: its 276 to 305 us were the stretched span of an overlapped node,
+and the island is not the cause. The pull-form sums at 80 rows: 10.12 ms against the push form's 6.14 (the FFN sites
+112 to 114 us against 59 to 61), a loss; the reduce-scatter form was already in effect at 80 rows by its row rule
+(forcing it: 6.16 against 6.14). The profile of the 80-row steps (a compute-kernel table, card 0, the last five steps
+of the dump, 39.6 ms of kernels in a 41.5 ms step): the expert GEMM kernels 317 us a layer (gate-up 226, down 91,
+one launch each), the bench's 300; so the kernel is not slower in the step, and the node's 469 to 540 us a layer
+holds 150 to 220 us that is not its kernels. The sum kernels say where: 12.5 ms a step of reduce, push and gather
+kernels against 6.1 ms of sum sites on the path, and the rs_reduce launches with a 17 us median and a 785 us mean,
+kernels that arrive early and spin on the peers' flags inside the expert node's span, about 6 ms a step: the wait for
+the slowest rank. The host: clocks 2,415 MHz SM and 12,481 MHz memory under load in both the step and the bench, 280
+of 600 W, no throttling; pod B, which shares the host, was not stepping during any of the measurements. The topology
+(nvidia-smi topo -m): no pod has its four cards on one socket; A and C have GPU0 alone on NUMA 0 with SYS links to
+the other three (2 and 3 switch-local), B and D have GPU3 alone on NUMA 1; every pod's rank graph crosses the socket
+link for three of its six pairs, the lone card for all three of its. The sum trace (SUM_TRACE: arrival and the end
+of the wait per site and rank) and the per-rank timeline (VXPU_PHASE_TRACE=all, stepgraph) measure which rank is
+late and whether the skew is born before the sum or in the exchange; the pod placement (four cards of one socket a
+pod) is the change for the next run.
+
