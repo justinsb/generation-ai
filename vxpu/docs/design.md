@@ -7553,6 +7553,95 @@ of the smallest flat program that fits with the drafts of the highest survival a
 4 at 97 percent conditional acceptance on code: the cap binds, not the policy, and a deeper step needs a block-7
 b16 export with flats at 96 and 112 rows.
 
+**The 16-stream code step on its critical path (Nov 6, pod C).** The stamped main program at 16 x 5 = 80 rows
+(tree50, the W50-16c env: TP4 slices, DN_KS 1, bf16 wire; one stamped step, 40.10 ms wall, the entries' 80-row flat
+reads 41.0): the routed expert node 21.58 ms on the path (54 percent; 472 to 668 us a layer), the 90 sum sites 6.14
+(15 percent; 58 to 61 us a site, the head's gather 0.83 at the end), attention core and out 3.72, the router front
+2.55, the hc front 1.70, the attention projections 1.69 (one of each pair overlapped), dense other 1.54, engram 0.72;
+idle 0.45 ms in all, 1.1 to 1.3 us between nodes: the host is not in this step. The shared-expert island, 14.05 ms
+of kernels (276 to 305 us a layer), is entirely off the path, overlapped with the expert node. The number: the
+expert node runs 540 us a layer in the step where the same routing and kernel (the GEMM form, 480 pairs over 100
+distinct, TP4 slices) read 300 us alone on the bench the same afternoon, at the HBM floor; the 9.6 ms between the
+two, 24 percent of the step, is inferred to be the expert node slowed by the island beside it, which shares the
+card's bandwidth and SMs; the A/B is the same trace with every node on one stream (VXPU_PARALLEL_BRANCHES=0). The
+island's own cost is an item either way: one shared FFN at 80 rows in 276 to 305 us is about 10x its byte floor (35
+MB) and far above its compute, a GEMV-form kernel at width.
+
+**Inside the 16-stream code step's expert node (Nov 6, pod C).** The A/B with every node on one stream
+(VXPU_PARALLEL_BRANCHES=0): the expert node 20.93 ms a step (469 us a layer) against 21.58 beside the island, and the
+shared expert alone 1.77 ms a step, 44 us a layer: its 276 to 305 us were the stretched span of an overlapped node,
+and the island is not the cause. The pull-form sums at 80 rows: 10.12 ms against the push form's 6.14 (the FFN sites
+112 to 114 us against 59 to 61), a loss; the reduce-scatter form was already in effect at 80 rows by its row rule
+(forcing it: 6.16 against 6.14). The profile of the 80-row steps (a compute-kernel table, card 0, the last five steps
+of the dump, 39.6 ms of kernels in a 41.5 ms step): the expert GEMM kernels 317 us a layer (gate-up 226, down 91,
+one launch each), the bench's 300; so the kernel is not slower in the step, and the node's 469 to 540 us a layer
+holds 150 to 220 us that is not its kernels. The sum kernels say where: 12.5 ms a step of reduce, push and gather
+kernels against 6.1 ms of sum sites on the path, and the rs_reduce launches with a 17 us median and a 785 us mean,
+kernels that arrive early and spin on the peers' flags inside the expert node's span, about 6 ms a step: the wait for
+the slowest rank. The host: clocks 2,415 MHz SM and 12,481 MHz memory under load in both the step and the bench, 280
+of 600 W, no throttling; pod B, which shares the host, was not stepping during any of the measurements. The topology
+(nvidia-smi topo -m): no pod has its four cards on one socket; A and C have GPU0 alone on NUMA 0 with SYS links to
+the other three (2 and 3 switch-local), B and D have GPU3 alone on NUMA 1; every pod's rank graph crosses the socket
+link for three of its six pairs, the lone card for all three of its. The sum trace (SUM_TRACE: arrival and the end
+of the wait per site and rank) and the per-rank timeline (VXPU_PHASE_TRACE=all, stepgraph) measure which rank is
+late and whether the skew is born before the sum or in the exchange; the pod placement (four cards of one socket a
+pod) is the change for the next run.
+
+**The deep budget at 16 streams code (Nov 6, pod C, tree88).** The block-7 b16 export (step_tokens 8, seven drafts a
+stream, flats to 128 rows, every program re-exported with the width mains' flags: sharded Markov head, fp8 draft
+head, embed-rows; a flat exports in 90 s, the main in 130). With the partial set (main, t3, t4, f96, f112, f128), the
+cost-model layout (plan sb7c): 1,533.9 tok/s aggregate at 51.73 ms median (51.38 mean), 5.82 drafts issued and 4.89
+accepted a stream a step, 5.89 tokens, programs f96 x 29, f112 x 32, f128 x 4, the 8-row rectangle x 16, conditional
+acceptance 0.941 0.954 0.941 0.945 0.948 0.892 0.831; the slots form 1,553.8 at 49.14 with 5.56 tokens, but that form
+takes the smallest flat that holds the live token rows (f96 here, f48 with the full set) and fills it by survival, a
+degenerate control at width (the W50 entries ran the rate-ordered slots form, the cost model's choice in effect).
+Against W50-16c-bf16f (block 5: 1,538.9 at 39.28, 4.18 tokens): the depth is there and the acceptance holds through
+the seventh position, but the step grew as much as the tokens, 0.21 to 0.23 ms a row at the margin from 96 to 128
+rows plus 1.5 ms of drafter at block 7 (4.8 against 3.3), so the harness aggregate is flat and the step arithmetic
+(16 x tokens over the step) reads 1,822 against 1,703, 7 percent. Their figures re-read from the vllm-ref record:
+"acceptance length 6.06" is accepted tokens over drafts from the /metrics deltas, the bonus token included, so tokens a
+stream a step; their per-position figures are marginal rates (summing to 5.58); their per-stream median 140.5 tok/s
+puts their step at 43.1 ms (44.7 in r2). So at 16 streams code the tokens a step are within 3 to 4 percent (6.06
+against 5.89) and the step is 7 to 9 ms longer (51.7 against 43 to 45), the sum kernels' spin on the slowest rank
+plus the drafter's extra; the skew trace measures the first. The fixed depth-7 arm on the 128-row program follows.
+
+**The fixed depth-7 arm settles the depth axis (Nov 6, pod C, tree88).** Every stream issues the drafter's seven every
+step on the 128-row program (plan f7flat: policy fixed, draft 7, shape flat, flat_rows 128): 1,370.9 tok/s aggregate
+at 56.27 ms median (55.44 mean), 7.0 issued, 5.12 accepted, 6.12 tokens a stream a step (conditional 0.928 0.935
+0.936 0.913 0.922 0.887 0.792), the 128-row flat 51.6 ms on 55 steps and the 8-row rectangle 48.3 on 29, text
+identical to the cost-model arm's. Their 6.06 to 6.14 tokens a stream a step are matched; by the step arithmetic (16
+x tokens over the step) the arm reads 1,740 against the cost model's 1,822 and the block-5 entry's 1,703, so at our
+per-row cost the full depth pays less per millisecond than the cost model's 5.8 issued. The whole remaining 16-stream
+code gap is the step at the same 128 rows: 55.4 ms against their 43 to 45. The skew trace, the per-rank timeline and
+the two fix arms (the lone cross-socket card as rank 3; the two-part push with the bf16 wire) run on that program.
+
+**The step at 128 rows, per rank (Nov 6, pod C, tree88, plan b7h).** The skew trace at the hc sum sites: the four
+ranks arrive within 5 to 20 us of one another (clocks calibrated) and wait 1 to 20 us (medians 14.1 / 0.8 / 2.1 / 4.2
+us for ranks 0 to 3, rank 0 the first to arrive): the lone cross-socket card is not late, and the hc sites are not
+waiting on a rank; their 85 us a site at 128 rows is the exchange itself. The per-rank timeline (every rank's graph
+stamped): the ranks are the same at every class and every node of a layer, stamped wall 44.7 to 45.8 ms, the expert
+node 19.6 ms (492 us a layer), the sum sites 9.0 to 9.9 (85 us a site), attention core 5.1, router front 3.7, the
+island 12.9 overlapped; the harness's step 52.4 ms. So our verify program's device span equals their whole step (43
+to 45 ms) and the 7 ms outside the graph are the drafter's separate program (4.8 ms a call at 112 rows, its own four
+rank graphs and sums) plus about 2.6 ms of host between the two programs; their drafter runs inside their step. Fix
+arms: the lone card as rank 3 loses (the expert node 544 us a layer on every rank, wall +2.4 ms); the two-part push
+with the bf16 wire is a wash (+0.5 ms). Items for the next run: the drafter inside the step or launched without the
+host hop (the one-pass block-7 drafter); the sum form at width (85 us a site); the expert node's 190 us a layer above
+its kernels, whose home is neither the island, nor the sums, nor a slow rank (a per-kernel table inside one node span
+is the next instrument).
+
+**The expert node at 128 rows, kernel by kernel (Nov 6, pod C).** From the profiler dump of the fixed depth-7 step
+(card 0, the last step, 53.1 ms): one node's bracket from the router front's last kernel to the FFN sum's first, in
+launch order: elementwise 1.3 us, MXFP8 recode 2.1, the slot gather 8.1, the island's dual GEMV 41.9 (side stream),
+elementwise 2.8, the grouped schedule 5.2, elementwise 4.7, the gate-up GEMM 307.3, SwiGLU rows 14.4, recode 2.2, the
+island's w2 GEMV 11.9 (side stream), SwiGLU quant 3.3, the down GEMM 123.2, an aten reduce 6.8, a fused copy 2.2, the
+sum's push 30.8; span 510 us. Over the step's 43 nodes: span median 488 us, idle inside 2 us; gate-up 281, down 112,
+the ten small kernels about 60. At 768 pairs over about 120 distinct slices (564 MB) the two GEMMs run at 1.43 TB/s,
+the HBM floor, so the expert node is 92 percent its own kernels at this width and the earlier "190 us above the
+kernels" shrinks to about 40; the fusable remainder is the ten small kernels (2.4 ms a step), a hero 16 item. The
+levers of the 16-stream code step stand: the drafter's program and the host between the programs (7 ms), the sum
+sites (85 us a site, 7.7 to 9.9 ms), the ten small kernels (2.4 ms).
+
 **The league table at the close of hero 15 (Nov 6, 10:30 UTC; two readings still running).** Their numbers are the
 vLLM fork measured on our four cards by the vllm-ref pod, the league method (one prompt a case, the decode window).
 One stream, prose: the five-row fp8-head drafter under the cost-model budget (plan b4h, programs 1 to 4, TP4

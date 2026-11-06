@@ -357,7 +357,7 @@ KNOBS = {
     "FP4_ONE_WARPS": int, "FP4_ONE_STAGES": int, "FP4_PDL": int,  # its warps and stages; the two-launch path's down kernel as a programmatic dependent launch (0 off, 1 whole-grid wait, 2 per-pair counters)
     # the direct kernels under expert parallelism (hero run 15): the compact grid, the held pairs' programs first in
     # dispatch order and the unheld pairs' empty programs last
-    "FP4_DIRECT_COMPACT": bool, "FP4_DIRECT_GROUP": bool, "FP4_DIRECT_FIRST": bool,
+    "FP4_DIRECT_COMPACT": bool, "FP4_DIRECT_GROUP": bool, "FP4_DIRECT_FIRST": bool, "SHARED_FFN_GEMM_MIN_ROWS": int,
     # the direct expert kernels' K splits (hero run 15): gate/up over K, down over I; a per-rows choice (knobs_by_rows)
     "FP4_GU_KS": int, "FP4_DN_KS": int,
     # the expert GEMM form (hero run 15): from this many pairs a layer the grouped schedule's blocks run through the
@@ -486,6 +486,19 @@ def table_entry(table, op, site=None, shapes=None):
     return index["op"].get(op)
 
 
+# knobs that live in a module other than triton_ops (whose source is hashed into every package's key, so a knob
+# that only an op strategy reads is kept out of it)
+_KNOB_HOMES = {"SHARED_FFN_GEMM_MIN_ROWS": "ops"}
+
+
+def _knob_home(name, triton_ops):
+    home = _KNOB_HOMES.get(name)
+    if home is None:
+        return triton_ops
+    import importlib
+    return importlib.import_module(f".{home}", __package__)
+
+
 def apply_knobs(knobs):
     """Set triton_ops' knobs from the table. The kernels read them at each
     call, so this takes effect for everything launched afterwards (and
@@ -496,12 +509,13 @@ def apply_knobs(knobs):
     for name, value in knobs.items():
         if os.environ.get("VXPU_" + name) not in (None, ""):
             continue  # the environment is the A/B override of a table's value
+        home = _knob_home(name, triton_ops)
         if KNOBS[name] is bool:
-            setattr(triton_ops, name, "1" if value else "0")
+            setattr(home, name, "1" if value else "0")
         elif name in ("FP4_KSPLIT", "FP4_GU_KS", "FP4_DN_KS"):
-            setattr(triton_ops, name, str(int(value)))
+            setattr(home, name, str(int(value)))
         else:
-            setattr(triton_ops, name, int(value))
+            setattr(home, name, int(value))
     cached = getattr(triton_ops, "_fp4_native", None)  # memoized per device from FP4_NATIVE
     if cached is not None and hasattr(cached, "cache_clear"):
         cached.cache_clear()
@@ -538,7 +552,7 @@ def effective_knobs():
         return {}
     out = {}
     for name, kind in KNOBS.items():
-        value = getattr(triton_ops, name, None)
+        value = getattr(_knob_home(name, triton_ops), name, None)
         if value is None:
             out[name] = None
         elif kind is bool:
