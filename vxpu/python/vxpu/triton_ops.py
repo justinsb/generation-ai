@@ -4631,12 +4631,13 @@ def _fp4_fuse(indices, per_pair, KS, KS2, bn1, bits=None):
     conditions hold): lookup (bit 1: the schedule's kernel looks the slots up; needs the expert
     ids), epi (bit 2: the SwiGLU and quantization as the gate/up kernel's epilogue; needs an
     unsplit K and a row tile of whole 32-blocks), summed (bit 4: the token sum as the down
-    kernel's epilogue; needs the ids, an unsplit I and a summed reply). Returns (lookup, epi,
-    summed)."""
+    kernel's epilogue; needs the ids, an unsplit I and a summed reply), pdl (bit 8: the down
+    kernel a programmatic dependent launch of the gate/up kernel, whole-grid wait; needs the
+    card's and Triton's support). Returns (lookup, epi, summed, pdl)."""
     bits = int(FP4_FUSE_EPI) if bits is None else int(bits)
     ids = indices is not None
     return (bool(bits & 1) and ids, bool(bits & 2) and KS == 1 and bn1 % 32 == 0,
-            bool(bits & 4) and ids and KS2 == 1 and not per_pair)
+            bool(bits & 4) and ids and KS2 == 1 and not per_pair, bool(bits & 8) and _gdc_wait is not None)
 
 
 def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit, per_pair, indices, start, native):
@@ -4660,8 +4661,9 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
     # replies itself (the combine gone), and runs as a dependent launch on per-block arrivals (FP4_PDL)
     fold = FP4_GEMM_FOLD and indices is not None and KS2 == 1
     # the fusions (FP4_FUSE_EPI, hero run 15, Nov 6); the fold is the earlier form and takes none of them
-    lookup, epi, summed = _fp4_fuse(indices, per_pair, KS, KS2, bn1) if not fold else (True, False, not per_pair)
-    mode = _fp4_pdl_mode() if fold else 0
+    lookup, epi, summed, dep = (_fp4_fuse(indices, per_pair, KS, KS2, bn1) if not fold
+                                else (True, False, not per_pair, False))
+    mode = _fp4_pdl_mode() if fold else (1 if dep else 0)
     pdl, wait = mode > 0, mode == 2
     idx = indices.contiguous().view(-1) if indices is not None else None
     smap = slots.contiguous() if indices is not None else None
@@ -4718,9 +4720,11 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
             _swiglu_quant_kernel[(triton.cdiv(I // 32, 16), pairs)](g, u, wt, slot, h, I, float(swiglu_limit), G=16,
                                                                   KS=KS, PAIRS=pairs)
         if not (fold or summed):
+            # under the dependent launch (bit 8) the down kernel's launch overlaps the kernel before it and its programs
+            # wait for that kernel's completion before they read h (the SwiGLU kernel's when one runs, else gate/up's)
             _fp4_gemm_down_kernel[(blocks, nt, KS2)](
                 h, order, blk_slot, blk_first, blk_count, d2, s2.view(torch.uint8), d, K, I, pairs, BM=bm, BN=bn2, BK=bk2,
-                NATIVE=native, TMA=tma, KS2=KS2, num_warps=warps2, num_stages=stages2)
+                NATIVE=native, TMA=tma, KS2=KS2, PDL=pdl, num_warps=warps2, num_stages=stages2, launch_pdl=pdl)
         else:
             _fp4_gemm_down_kernel[(blocks, nt, 1)](
                 h, order, blk_slot, blk_first, blk_count, d2, s2.view(torch.uint8), d, K, I, pairs, BM=bm, BN=bn2, BK=bk2,
