@@ -368,11 +368,40 @@ class Packages:
 
     def _path(self, sub, args, extra, code, dynamic_shapes=None):
         path = os.path.join(self.cache_dir, cache_key(sub, args, extra, code) + ".pt2")
+        if not os.path.exists(path):
+            self._log_key(path, sub, args, extra, code, dynamic_shapes)
         # one build at a time in this process: torch.export keeps tracing state in module globals,
         # and the ranks of a tensor-parallel step reach their first (eager) step on threads of
         # their own (parallel.World), each building the packages its segments lack
         with _BUILD_LOCK:  # re-entrant: GraphedSegment.forward holds it around the first call
             return self._build(path, sub, args, dynamic_shapes)
+
+    def _log_key(self, path, sub, args, extra, code, dynamic_shapes):
+        """The key inputs of a package about to be built, kept beside the cache (keys/<key>.txt: the canonical code,
+        each argument's shape, stride, dtype and device, the extra string, the dynamic shapes), so two loads that build
+        the same segment under different keys can be diffed offline. Hero run 15 (Nov 6): every load rebuilt 17 to 30
+        of a rank program's 373 segments, about 2.5 hours of cards in a day, and nothing named the moving field."""
+        try:
+            d = os.path.join(self.cache_dir, "keys")
+            os.makedirs(d, exist_ok=True)
+            key = os.path.basename(path)[:-len(".pt2")]
+            text = code if code is not None else canonical_code(sub)
+            lines = [f"key {key}", f"pid {os.getpid()} time {time.strftime('%H:%M:%S')}", f"extra {extra}",
+                     f"dynamic_shapes {dynamic_shapes!r}"]
+            for i, a in enumerate(args):
+                if isinstance(a, torch.Tensor):
+                    lines.append(f"arg {i} T{tuple(a.shape)} stride {a.stride()} {a.dtype} {a.device}")
+                else:
+                    lines.append(f"arg {i} {a!r}")
+            lines.append("code:")
+            lines.append(text)
+            with open(os.path.join(d, key + ".txt"), "w") as f:
+                f.write("\n".join(lines) + "\n")
+            with open(os.path.join(self.cache_dir, "key-log.txt"), "a") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} pid {os.getpid()} build {key} code_sha {hashlib.sha256(text.encode()).hexdigest()[:12]} "
+                        f"nargs {len(args)} extra_sha {hashlib.sha256(extra.encode()).hexdigest()[:12]}\n")
+        except Exception as e:  # noqa: BLE001  (a log, never a reason to fail a build)
+            print(f"[vxpu] aoti: key log skipped: {type(e).__name__}: {e}", flush=True)
 
     def _build(self, path, sub, args, dynamic_shapes):
         if os.path.exists(path):
