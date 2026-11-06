@@ -1610,7 +1610,8 @@ class Engine:
                         drafts.append(row[:block])
                     live = [i for i in range(R) if not done[i]]
                     layout = (self._flat_layout(issued, rows_out, live, flat_sizes, policy.fill, policy.policy == speculation.SLOTS,
-                                                R, S, max_draft, block, scale, cost_model=policy.cost_model, account=account)
+                                                R, S, max_draft, block, scale, cost_model=policy.cost_model, account=account,
+                                                constants=policy.constants())
                               if flat_sizes else None)
                     if layout is not None:  # the flat shape: the rows one token each in a flat program (hero run 15)
                         T, lay_seq, lay_rank, issued = layout
@@ -1888,7 +1889,7 @@ class Engine:
         return p
 
     def _flat_layout(self, issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale, cost_model=False,
-                     account=None):
+                     account=None, constants=None):
         """The flat token-row verify's program and rows for a step (hero run 15): the smallest program of `flat_sizes`
         that fits the policy's depths (each live row its token then its issued drafts), its spare rows filled by
         `fill`: "drafts" gives them to the next drafts with the highest survival, in order, which keeps every row's
@@ -1912,7 +1913,21 @@ class Engine:
         cands = sorted(((self._survival(rows_out, i, k, block, scale), -i, i, k)
                         for i in live for k in range(issued0[i], max_draft)), reverse=True) if (slots or fill == "drafts") else []
         T = sizes[0]
-        if cost_model and slots and account is not None and len(sizes) > 1:
+        if cost_model and slots and constants and len(sizes) > 1:
+            # the plan's constants (Policy.constants): the same arithmetic as below over given times, so every rank of
+            # a process-per-rank world picks the same program from the same logits with no timing read
+            vm, d_ms = constants["verify_ms"], constants["draft_ms"]
+            best = None
+            for n in sizes:
+                if f"flat{n}" not in vm:
+                    continue
+                tokens = len(live) + sum(sv for sv, _, _, _ in cands[:n - need])
+                score = tokens / (d_ms + vm[f"flat{n}"])
+                if best is None or score > best[0]:
+                    best = (score, n)
+            if best is not None:
+                T = best[1]
+        elif cost_model and slots and account is not None and len(sizes) > 1:
             import statistics as _st
             timed = {n: account["verify_ms"].get(f"flat{n}") for n in sizes}
             untried = [n for n in sizes if not timed[n]]
