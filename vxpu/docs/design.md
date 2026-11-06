@@ -7915,6 +7915,63 @@ the critical path over 40 layers and the heads, and 1.3 ms on the island's side 
 fp32 accumulation order (a class), so the tuned run is gated on text. The dispatcher's defaults above 64 rows were
 the one-row tiles carried through the row-tiled form: BN 16 reads the 64-row x tile N / 16 times a call.
 
+**Their NCCL env in our four processes: the transport was the whole NCCL gap (Nov 6, 20:25 UTC).** F92-16c-deep7-fixed7-env
+(their launcher's env for this hardware verbatim: NCCL_P2P_LEVEL=SYS, NCCL_PROTO=LL,LL128,Simple, 16 channels, 2 MiB
+buffers, NCCL_IB_DISABLE=1, CUDA_DEVICE_MAX_CONNECTIONS=32, CUDA_DEVICE_ORDER=PCI_BUS_ID, the expandable-segments
+allocator): 1,522.9 tok/s at 55.27 ms a step, and 1,525.2 at 55.18 with NCCL_SHM_DISABLE=1 beside it as the loud check;
+text identical to the one-process arm; every hop "via P2P/CUMEM" on all 16 channels; the sum sites 86 to 87 us a
+site (from 152 under the default env; the one-process push 85; theirs 70 to 90). So the four-process form with
+NCCL is now within 1 ms a step of the one-process push form's step (55.2 against 56.3 the one-process fixed-7 arm)
+and ahead of it in tok/s (1,525 against 1,371). What the same stamps show next: the expert node in the 128-row
+program reads 704 to 706 us a layer under this env (27.9 ms), 667 under the default env (2 channels through host
+memory), 492 in one process (no NCCL kernels in the step); the main program's node 534 / 526 / 492 the same way;
+monotone with NCCL's resident channels, consistent with the ring kernels' CTAs and bandwidth overlapping the expert
+GEMMs, not yet proven (the 4-channel arm and a per-rank kernel table are the separation; the own push form across
+the processes, h15-ppr-ipc, failed before its first capture at triton_ops.ring_write, "Pointer argument cannot be
+accessed from Triton", on the IPC-mapped peer inbox, so it could not serve as the no-NCCL control tonight).
+
+**The expert fusions on the card (Nov 6, 20:35 UTC, h15-expert-fusion's bench beside the rebuild).** One layer's
+expert node at 128 rows (768 pairs over 128 TP4 slots), each FP4_FUSE_EPI arm as a captured graph's replay: arm 0
+509.5 us (gate/up 322.0, down 147.4, the small kernels 31.1, 9 launches); bit 1 (the schedule looks the slots up)
+502.0, identical to arm 0; bits 1+2 (the SwiGLU and the per-32 quant as the gate/up epilogue) 498.4, identical, 5
+launches; bits 1+2+4 (the token sum as the down epilogue) 512.1 and a rounding class (67 elements at 2.4e-4): the
+down GEMM reads 179.9 against 147.4 with the epilogue, more than the 11 us of fill and reduce it removes; bit 8 (the
+down as a PDL dependent) the same wall; the Nov 5 fold 629. Every arm including arm 0 differs from the direct
+kernels by 16 at about 1.6 percent of the elements, the GEMM form's known class. So FP4_FUSE_EPI=3 is exact and worth
+11 us a layer; it runs as the knob entry on the tuned run's packages.
+
+**The swept tiles on the entry (Nov 6, 20:43 UTC).** F93-16c-deep7-fixed7-tuned: the F91 configuration (four
+processes, NCCL's default transport by a hand-off defect, so F91 is its control) with the 16-entry table: 1,430.5
+tok/s at 60.16 ms a step (75 steps, 5.17 accepted), text identical to the one-process arm; against F91's 1,388.5 at
+61.91. The table rebuilt 26 to 30 of the 373 segments a program (the GEMV launches live in a few), 6 minutes in the
+four processes. Stamped per rank: the main program 50.4 ms against 52.8 (the attention projections 2.46 against
+3.26 ms, 31 us a launch from 40; the expert node 500 against 526 us a layer with the island's dual GEMV inside its
+span; the island class 2.4 against 13.2 ms, now 35 us a layer serial; attention core 120 against 128 us), the 128-row
+program 57.2 against 59.5, the sum sites unchanged at 151 us (the default transport). So the tiles are worth 1.75 ms
+a step at 128 rows, the sweep's on-paper 1.4 plus the island; the same table with their NCCL env follows as F93b.
+
+**The tiles and their NCCL env together (Nov 6, 21:12 UTC): the four-process entry passes the entry of record.**
+F93b-16c-deep7-fixed7-tuned-env (four processes, the 16-entry table, their NCCL env at 16 channels, the fused mix,
+fixed depth 7, 16 streams code, stamps on): 1,549.9 tok/s at 52.71 ms a step (79 steps, 5.11 accepted of 7), text
+identical to the one-process arm and to both single-change arms; above the block-5 entry of record's 1,538.9 and
+3.6 ms a step under the one-process fixed-7 step (56.27, 1,370.9). The deltas composed: 55.18 (the env alone) less
+the tiles' 1.75 predicts 53.4, read 52.7. Stamped per rank: the main program 44.17 ms (experts 508 us a layer, sum
+sites 86 us x 89, attention core 4.98 ms, ffn front 3.69, projections 31 us a launch, hc front 1.95, island 35 us a
+layer serial), the 128-row program 51.19 (experts 647), the drafter's program 2.28. The 4-channel arm of the env
+alone (F92-16c-deep7-fixed7-env-ch4) read 54.17 ms against 55.18 at 16 channels with the sites at 79 to 80 us and the
+expert node 655 against 705 us a layer in the 128-row program (508 against 534 in the main): the node tracks NCCL's
+resident channels, a residue of about 160 us a layer above the one-process node (492) remaining with NCCL present.
+Its harness rate (1,426.6) sits below F92's through the acceptance draw (84 steps against 77 at identical text); the
+step is the comparison. The pod A agent's d2 reads 147 us a site under the same env with all four cards on one socket
+(bus 05, 06, 0A, 0B) against C's split (05, 85, 89, 8A).
+
+**The exact fusions on the entry (Nov 6, 21:19 UTC).** F94-16c-deep7-fixed7-tuned-fuse3 (F93b plus FP4_FUSE_EPI=3):
+1,569.9 tok/s at 52.07 ms a step (79 steps, 5.11 accepted, the same draw as F93b), text identical; the knob is worth
+0.64 ms a step: the expert node 486 us a layer from 508 in the main program and 638 from 647 in the 128-row program,
+nothing else moved. The stack in four processes: 1,569.9 at 52.07 against the one-process fixed-7 arm's 1,370.9 at
+56.27 and the block-5 entry of record's 1,538.9 at 39.3; the four changes compose on the stamps (the transport 66 us
+a site, the tiles 1.75 ms, the fusions 0.64, the host hop 1.8 and the drafter's program 2.5 against 4.9 in one process).
+
 **The league table at the close of hero 15 (Nov 6, 10:30 UTC; two readings still running).** Their numbers are the
 vLLM fork measured on our four cards by the vllm-ref pod, the league method (one prompt a case, the decode window).
 One stream, prose: the five-row fp8-head drafter under the cost-model budget (plan b4h, programs 1 to 4, TP4
