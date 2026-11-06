@@ -92,8 +92,9 @@ def _crc(seq, payload):
     return zlib.crc32(payload, zlib.crc32(WORD.pack(seq)))
 
 
-def _wait(ready, timeout, what):
-    """Spin on ready() until it returns a value that is not None; yield after SPIN_SECONDS; raise after timeout."""
+def _wait(ready, timeout, what, check=None):
+    """Spin on ready() until it returns a value that is not None; yield after SPIN_SECONDS; raise after
+    timeout. `check()` runs while yielding and may raise (a peer process that died)."""
     timeout = TIMEOUT if timeout is None else timeout
     v = ready()
     if v is not None:
@@ -107,6 +108,8 @@ def _wait(ready, timeout, what):
         if elapsed > timeout:
             raise TimeoutError(f"mailbox: {what} did not arrive in {timeout:.1f} s")
         if elapsed > SPIN_SECONDS:
+            if check is not None:
+                check()
             time.sleep(0)
 
 
@@ -120,7 +123,7 @@ class Barrier:
     def _word(self, m):
         return self.offset + self.members.index(m) * LINE
 
-    def wait(self, me, timeout=None):
+    def wait(self, me, timeout=None, check=None):
         gen = self._gen.get(me, 0) + 1
         self._gen[me] = gen
         WORD.pack_into(self.buf, self._word(me), gen)
@@ -128,7 +131,7 @@ class Barrier:
 
         def ready():
             return True if all(WORD.unpack_from(self.buf, o)[0] >= gen for o in others) else None
-        _wait(ready, timeout, f"barrier generation {gen} for member {me}")
+        _wait(ready, timeout, f"barrier generation {gen} for member {me}", check)
         return gen
 
     def reset(self):
@@ -172,7 +175,7 @@ class Mailbox:
         self.published = seq
         return seq
 
-    def receive(self, me, timeout=None):
+    def receive(self, me, timeout=None, check=None):
         """The next message for consumer `me`: (sequence number, payload bytes)."""
         seq = self._received.get(me, 0) + 1
         at = self._slot(seq)
@@ -189,7 +192,7 @@ class Mailbox:
             if _crc(seq, payload) != crc or WORD.unpack_from(self.buf, at)[0] != seq:
                 return None  # a stale or torn payload or header under the new sequence number: read again
             return payload
-        payload = _wait(ready, timeout, f"message {seq} for consumer {me}")
+        payload = _wait(ready, timeout, f"message {seq} for consumer {me}", check)
         self._received[me] = seq
         WORD.pack_into(self.buf, self._credit(me), seq)
         return seq, payload

@@ -7688,3 +7688,37 @@ prime is on record without a cause: the five-row line's first try sat after its 
 percent on the cards, every thread waiting and no AOTI package written for 44 minutes, and the same env passed on
 the second try; the candidates are a PDL dependent launch whose primary never resolves or the expert mailbox's host
 poll on a flag nobody raises.
+
+### One process per card (#539)
+
+The decision of Nov 6: one executor process per card, with the step's control plane in shared memory and the Go
+per-machine agent as the coordinator later. The measured reasons are in the issue: the host hop between the drafter
+and the verify (1.8 ms of the 53 ms step at 16 streams code, done once and serially by the one process), the launch
+skew of four graphs launched from one thread (33 / 72 / 104 us at one stream), the serial package builds, and NCCL's
+native shape. The slices are 200-line PRs with GPU-free tests; the hero-machine acceptance is the six league entries
+with identical text and the stamped breakdowns against the Nov 6 numbers of record.
+
+**Slice 1, the control plane (vxpu.ppr.mailbox, vxpu.ppr.control).** A shared-memory region both sides lay out from
+one spec: a barrier (a generation word per member) and mailboxes with one producer, fixed consumers, a ring of
+fixed-size slots and a credit word per consumer. Every word has one writer, so there are no atomics and no lock; the
+payload's CRC is seeded with the sequence number and written before it, which is what makes the protocol safe
+without store ordering from Python (the first run of the test delivered an empty message from a header read torn
+between the new sequence number and the slot's zero length). The messages are fixed records: Step (per stream the
+token, position, up to 8 drafts and the issued mask, with the program), Choices, Acceptance, Layout, Reset, Stop.
+Measured on the laptop (Apple Silicon, Python 3.13): one Step out and four Choices back, 16 streams, 1,000 times,
+22.4 us median and 24.5 us p90; the c3d target of under 50 us has not been measured yet.
+
+**Slice 2, the executor skeleton (vxpu.ppr.executor, vxpu.ppr.coordinator, vxpu.ppr.world).** An executor process
+owns one rank: it loads through the engine with a world of its own (Engine(world=...), and Engine._build_tp builds
+world.local's ranks alone), and runs its step graph on every Step message; the coordinator spawns N of them, waits
+on the barrier for the loads, and runs the engine's tensor-parallel generation loop over the messages. On the CPU
+the eager collectives cross the processes through the exchange mailboxes (ppr.world.ProcessWorld, a parallel.World
+whose _exchange publishes and receives), summing in rank order as the thread world does. Measured on the selftest's
+tiny-deepseek-v41 exported with --tp 2 (the shape the selftest runs on the CPU), 24 greedy tokens on two prompts:
+the two processes' tokens are the two-thread engine's bit for bit, every rank's choices agree at every one of the 71
+steps (852 exchanges), and the step reads 11.8 ms median against 26.9 ms on two threads of one process, the GIL
+being out of the step; a process loads its rank in 3.6 to 3.9 s. The captured GPU step is not here: World.buffers (the inboxes and
+flags on every card, written by peer stores from one process) needs CUDA IPC handles or the per-rank NCCL
+communicators of slice 4, and the engine still fetches every dense weight whole in every process and slices after
+(a per-rank load reads the slice), loads the expert banks in every process, and would run the golden generation
+inside every load (the executor turns that check off; the coordinator checks tokens).

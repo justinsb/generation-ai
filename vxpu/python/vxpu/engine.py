@@ -233,7 +233,7 @@ class Engine:
 
     def __init__(self, artifact_dir, device="cpu", compile_decode=False,
                  cas_dir=None, external_dir=None, plan_given=None,
-                 _copy_worker_hook=None):
+                 _copy_worker_hook=None, world=None):
         from transformers import AutoTokenizer
         from transformers.models.auto.configuration_auto import (
             CONFIG_MAPPING)
@@ -347,7 +347,15 @@ class Engine:
                                  f"(this one: {par.get('world', 'none')})")
             gpus = [int(g) for g in str(self.plan["tp_gpus"]).split(",")]
             devices = [torch.device("cuda", g) if str(device).startswith("cuda") else torch.device("cpu") for g in gpus]
-            self.world = parallel.World(devices, scope=self.external_scope)
+            if world is not None:
+                # a world the caller made (ppr.world.ProcessWorld: this process is one rank of it, the
+                # others are processes of their own); the engine builds world.local's ranks alone
+                if world.size != self.tp or len(world.devices) != len(devices):
+                    raise ValueError(f"the given world has {world.size} ranks, the plan dense_tp={self.tp}")
+                world.scope = self.external_scope
+                self.world = world
+            else:
+                self.world = parallel.World(devices, scope=self.external_scope)
             self.external.world = self.world
             self.external.ep = True
 
@@ -1140,14 +1148,17 @@ class Engine:
         if cuda:
             configure_inductor(self.plan)
         self._tp_tensors = []  # per rank: its weight slices and state, the dict every program of the rank binds
-        for rank, dev in enumerate(self.world.devices):
+        # the ranks this process builds, in rank order: every rank of the thread world, the one rank of a
+        # process world (ppr, #539); the lists below are indexed by position, rank 0's first
+        for rank in self.world.local:
+            dev = self.world.devices[rank]
             t_rank = time.time()
             tensors = {fqn: self._tp_slice(fqn, t, rank, dev) for fqn, t in self.shared.items()}
             state = {fqn: torch.zeros(shape, dtype=dtype, device=dev) for fqn, (shape, dtype) in self.state_specs.items()}
             tensors.update(state)
             tensors.update({alias: tensors[canonical] for alias, canonical in self.aliases.items() if canonical in tensors})
             graph, split, runner = self._tp_rank_graph(os.path.join(self.artifact_dir, par["decode"][rank]), tensors, dev,
-                                                       rank, describe=(rank == 0))
+                                                       rank, describe=(rank == self.world.local[0]))
             if cuda:
                 for tensor in state.values():
                     torch._dynamo.mark_static_address(tensor)

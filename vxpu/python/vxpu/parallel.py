@@ -60,6 +60,7 @@ class World:
     def __init__(self, devices, scope=None):
         self.size = len(devices)
         self.devices = [torch.device(d) for d in devices]
+        self.local = list(range(self.size))  # the ranks this process builds and runs: all of them here
         self.scope = scope  # a context manager factory every rank's thread enters (the engine's external scope)
         self._local = threading.local()
         self._barrier = threading.Barrier(self.size)
@@ -302,7 +303,7 @@ class Decode(torch.nn.Module):
         from . import triton_ops
         triton_ops.mx_memo_clear()  # the producer-side MXFP8 fold's memo is a step's
 
-        def on(r):
+        def on(i, r):
             # the inputs are moved here, on the main thread, before any rank launches: a rank moving
             # its own on its thread (tried in hero run 15, worth 0 ms) deadlocks when an input lives
             # on a GPU whose stream is already spinning in a sum launched by another rank program
@@ -310,9 +311,10 @@ class Decode(torch.nn.Module):
             dev = self.world.devices[r]
             a = [x.to(dev, non_blocking=False) if isinstance(x, torch.Tensor) else x for x in args]
             k = {n: (x.to(dev, non_blocking=False) if isinstance(x, torch.Tensor) else x) for n, x in kwargs.items()}
-            return lambda: self.graphs[r](*a, **k)
+            return lambda: self.graphs[i](*a, **k)
 
-        fns = [on(r) for r in range(self.world.size)]
+        # graphs[i] is the step of rank world.local[i]: every rank in the thread world, one in a process world
+        fns = [on(i, r) for i, r in enumerate(self.world.local)]
         t1 = time.perf_counter()
         if SINGLE_LAUNCHER and all(hasattr(g, "launch") for g in self.graphs):
             # one thread launches every rank's graph, then waits for all: no hand-off to four
