@@ -7089,3 +7089,20 @@ few-row body not the cause; the down kernel's two-pairs-a-program form is what t
 experts, hence the direct-down arm. The sweep on the real 8-row routing (22 distinct of 48, 10 experts with 2+ rows)
 decides; it is where the byte saving is 54 percent.
 
+**The first-pair form on the real 8-row routing (Nov 6).** The trace from the block-7 artifact (160 tokens, 68
+drafted steps a layer, 2,720 layer-steps): 48 pairs over 23.0 distinct experts a layer, 10.3 experts with two or more
+rows, 52 percent of the pairs sharing an expert, up to 8 rows on one. The microbench on 32 of those layer-steps
+(21.2 distinct on the samples), every arm bit-identical to the direct form: TP4 shape (4.7 MB slices, all 48 pairs,
+floor 69 us) direct 141.3 us a layer; first-pair gate/up kernels over the direct down kernel 126.6 (gather body) and
+129.9 (per-slot body MT 4); the first-pair down kernel as well 132.0 / 134.6. EP4 shape (whole 18.8 MB experts, a
+card's 11.8 held pairs over 4.8 distinct, floor 63 us) direct 143.5; first-pair gate/up over the direct down 126.2;
+the first-pair down kernel as well 187.5 / 183.6. The result: the gate/up kernels in the first-pair form read each
+distinct expert once and save 10 to 12 percent of the expert node in both shapes (about 0.6 ms a step at 40 layers);
+the down kernel keeps the direct form, whose two-pairs-a-program latency chains the first-pair form cannot share
+on singleton experts. The node stays 1.8x its floor: 126.6 us for 100 MB of distinct bytes is 790 GB/s, so the
+first-pair programs do not run at the direct form's per-program speed either; the floor wants the many-row tile at
+the one-row kernel's bandwidth, which this body does not reach. The arm goes to the step entries as
+VXPU_FP4_DIRECT_FIRST=1 VXPU_FP4_FIRST_DOWN=0 VXPU_FP4_FIRST_MT=0 (block-7 code against 465.1 at 14.06 ms, five-row
+prose against 263.3 at 11.37, then the budget arms, each gated against its same-tree control and the tree41
+control); the PDL arms (FP4_PDL 1 and 2, the entries' setting) are measured on the microbench for the record.
+
