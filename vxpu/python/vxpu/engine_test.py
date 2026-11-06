@@ -168,3 +168,95 @@ class TensorParallelLoopChecks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpecVerifyRows(unittest.TestCase):
+    """The verify rows the fixed, half and flat shapes build on the device, on CPU tensors: a fixed draft under
+    the drafter's block issues exactly that many drafts a row into the program's width (hero run 15: the mask
+    had the policy's width and the drafts the block's, and the step failed at draft 5 on a block-7 drafter)."""
+
+    def test_fixed_depth_under_the_block_fills_the_program_width(self):
+        import torch
+        R, block, vrows = 3, 7, 8
+        first = torch.tensor([[100], [200], [300]])
+        dout = torch.cat([torch.arange(R * block).view(R, block) + 1, torch.zeros(R, block, dtype=torch.long)], 1)
+        for counts in ([5, 5, 5], [7, 7, 7], [5, 0, 7]):
+            ids, mask = engine._spec_verify_rows(first, dout, torch.tensor(counts), vrows, block)
+            self.assertEqual(tuple(ids.shape), (R, vrows))
+            self.assertEqual(tuple(mask.shape), (R, vrows - 1))
+            self.assertEqual(mask.sum(1).tolist(), counts)
+            for i, c in enumerate(counts):
+                self.assertEqual(ids[i, 0].item(), first[i].item())
+                self.assertEqual(ids[i, 1:c + 1].tolist(), dout[i, :c].tolist())  # the issued drafts
+                self.assertEqual(ids[i, c + 1:].tolist(), [first[i].item()] * (vrows - 1 - c))  # the rest, the token
+        ids, mask = engine._spec_verify_rows(first, dout, torch.tensor([3, 3, 3]), 10, block)  # a program wider than the block
+        self.assertEqual(tuple(ids.shape), (R, 10))
+        self.assertEqual(mask.sum(1).tolist(), [3, 3, 3])
+
+
+def _fork_available():
+    try:
+        from .deepseek_v41 import _fork
+        _fork()
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_fork_available(), "the DeepSeek-V4.1 fork is not checked out (vxpu/third_party/deepseek_v41)")
+class FixedDepthUnderTheBlock(unittest.TestCase):
+    """tiny-deepseek-v41 exported with --draft --draft-block 7 --step-tokens 8 at tp 2 (the selftest's CPU shape):
+    the fixed policy at draft 5 issues 5 a live row a step, at draft 7 issues 7, and both decode the undrafted
+    run's tokens (VXPU_NO_DRAFTS=1 through the same programs), the exactness the selftest checks for the drafted
+    shapes. On the CPU the drafted step runs its host path; the device path's rows are SpecVerifyRows."""
+
+    def test_fixed_5_and_7_match_the_undrafted_tokens(self):
+        import json
+        import os
+        import tempfile
+        from . import physplan
+        from .engine import Engine, SamplingParams
+        from .export import export_artifact
+        from .fixtures import tiny_deepseek_v41
+        prompts = [[(11 * i + 7 * j + 5) % 30000 + 100 for j in range(n)] for i, n in enumerate((9, 14))]
+        greedy = SamplingParams(do_sample=False)
+        keys = ("VXPU_DENSE_TP", "VXPU_DATAFLOW", "VXPU_CHECK_GOLDEN", "VXPU_PLAN", "VXPU_NO_DRAFTS")
+        previous = {k: os.environ.get(k) for k in keys}
+        with tempfile.TemporaryDirectory(prefix="vxpu-fixed-") as tmp:
+            model = tiny_deepseek_v41.write(os.path.join(tmp, "tiny-deepseek-v41"))
+            artifact = os.path.join(tmp, "artifact-tp2-b7s8")
+            export_artifact(model, artifact, max_cache_len=256, batch=1, step_tokens=8, draft=True, draft_block=7, tp=2)
+            os.environ.update({"VXPU_DENSE_TP": "2", "VXPU_DATAFLOW": "1", "VXPU_CHECK_GOLDEN": "0"})
+
+            def run(draft, no_drafts=False):
+                plan = os.path.join(tmp, f"plan{draft}{no_drafts}.json")
+                with open(plan, "w") as f:
+                    json.dump({"format": "vxpu-plan/1", "speculation": {"draft": draft, "policy": "fixed"}}, f)
+                os.environ["VXPU_PLAN"] = plan
+                if no_drafts:
+                    os.environ["VXPU_NO_DRAFTS"] = "1"
+                else:
+                    os.environ.pop("VXPU_NO_DRAFTS", None)
+                physplan._loaded = None
+                try:
+                    return Engine(artifact)._generate_rows_tp(prompts, 16, greedy)
+                finally:
+                    physplan._loaded = None
+            try:
+                plain = run(7, no_drafts=True)
+                five, seven = run(5), run(7)
+            finally:
+                for k, v in previous.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+        self.assertEqual(plain["drafted"], 0)
+        self.assertEqual(five["token_ids"], plain["token_ids"], "fixed 5 against the undrafted run")
+        self.assertEqual(seven["token_ids"], plain["token_ids"], "fixed 7 against the undrafted run")
+        self.assertEqual(five["drafted"], 5 * sum(five["rows_active"]), "5 drafts a live row a step")
+        self.assertEqual(seven["drafted"], 7 * sum(seven["rows_active"]), "7 drafts a live row a step")
+        self.assertGreater(five["accepted"], 0)
+        print(f"\nfixed depth under the block: draft 5 issued {five['drafted']} over {sum(five['rows_active'])} row-steps "
+              f"({five['accepted']} accepted), draft 7 issued {seven['drafted']}; both the undrafted run's "
+              f"{sum(map(len, plain['token_ids']))} tokens")
