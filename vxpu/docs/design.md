@@ -7668,3 +7668,14 @@ path for the one-token block, not fixed tonight: F101 not started. The two-ancho
 --draft-passes 2, spec3t8-b4p2-tp4-b16) exported in 131 s and its first run died at the load in the dense option's
 autotune of a new shape on the main thread (128x1280 -> 1024) and, on another rank, in a package's zip extraction;
 F102b runs it without the dense option on F97's stack otherwise, text-gated against F97.
+F102b then died with the whole of /mnt/ssd full (a stale 47 GB of extraction directories under cache/tmp); after
+the cleanup F102c ran the same export on F97's stack in four processes (Nov 6, 23:34 UTC reading, one run).
+
+**Two anchors of four lose a third of the accepted tokens (F102c, measured).** 1,218.2 tok/s at 54.96 ms median
+step against F97's 1,648.4 at 51.59: accepted 3.53 tokens a step against 5.14 for the block-7 drafter (-31 percent),
+and the drafter's wall is not cheaper for it (5.17 ms a step: experts 1.75 ms over 9 sites, 26 collectives 1.06 ms,
+dense 0.74 ms, island 0.65 ms; the single block-7 pass costs 5.34). The second pass restarts from the first pass's own
+states, so positions 5 to 7 are drafted on a guess of a guess, and the drop in the survival of the last three
+positions is bigger than what the fresh anchor returns at position 5. Booked as a negative for the two-pass form at
+block 4; it says nothing yet about their one-token chain, which still needs the empty-positions fix (F101). F103
+(block 2, four passes) is the last form in the queue tonight.
