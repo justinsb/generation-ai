@@ -7548,3 +7548,14 @@ the rows), which is why the step trails NCCL at 4 channels (54.17). The expert n
 residue of 160 to 170 us a layer belongs to the four-process form itself, not to NCCL's channels (which move it by
 50). The per-rank kernel table inside the node is the next instrument; the candidates are the per-process expert
 pool's slot map against the four-pool map and the per-process allocator's placement of the pools.
+
+**The stack on fixed depth 7 (Nov 6, 21:31 UTC): 1,630.8 tok/s at 51.75 ms in four processes.**
+F93c-16c-deep7-fixed7-tuned-nccl4-fuse3: the swept table, the two exact expert fusions, their NCCL env at 4 channels,
+the fused mix epilogue, four processes; 77 steps, 5.14 accepted of 7, text identical. Stamped: the main program 42.81
+ms (experts 483 us a layer, island 283 overlapped, sum sites 79 us x 89, attention core 4.97 ms, ffn front 3.68,
+projections 31 us a launch, hc front 1.95), the 128-row program 49.55 (experts 638, island 382), the drafter 2.20.
+The ladder, each step text-identical: 1,146.5 (NCCL, the aten epilogue) -> 1,388.5 (the fused mix) -> 1,525.2 (their
+transport: P2P across the socket) -> 1,549.9 (the tiles) -> 1,569.9 (the exact fusions) -> 1,630.8 (4 channels),
+against the one-process push form's 1,370.9 at 56.27 on the same fixed-7 configuration and the block-5 entry of
+record's 1,538.9 at 39.3. Open in this form: the expert node's 160 us a layer over one process (the profiler arm), and
+the stack on the block-5 fold itself (S93), both queued.
