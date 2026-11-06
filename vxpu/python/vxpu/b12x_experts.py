@@ -118,11 +118,16 @@ def run(x_in, weights, slots, indices, start, w2, swiglu_limit, per_pair=False, 
         ids = slots[(indices.reshape(-1) - start).long()].view(indices.shape)
     else:
         ids = slots
-    ids = ids.to(torch.int32).contiguous()
     n, topk = ids.shape
     K = x_in.shape[1]
     x = x_in.contiguous()
-    w = weights.to(torch.float32).contiguous()
+    # the step's padded rows (the flat programs' spare rows, a draft slot not issued) reach this op with whatever slot
+    # ids their rows hold; their kernel reads the expert an id names, so an id outside [0, E) corrupts other rows
+    # (the 8-stream run of Nov 6: degenerate text). Their compact kernel takes a flat pair list with a host-side token
+    # count and no per-route validity, and a captured graph cannot drop pairs by a data-dependent count, so the pairs
+    # stay and an invalid one becomes expert 0 with weight 0: one fused launch for the cast, the range check and the
+    # weight mask (the torch form cost five launches a layer, 0.5 ms a step at eight rows, with no padded row at all).
+    ids, w = _guard_pairs(ids, weights, pack.E)
     route = launch(scratch=pack.scratch(n, topk), a=x, topk_ids=ids, topk_weights=w, w13=pack.w13, w13_scales=pack.s13,
                    w2=pack.w2, w2_scales=pack.s2, alpha1=pack.alpha, alpha2=pack.alpha, input_scale=pack.one,
                    down_scale=pack.one, max_tokens=n, num_topk=topk, swiglu_limit=float(swiglu_limit), fast_math=FAST_MATH)
@@ -152,10 +157,38 @@ def _push(y, push):
     push["done"] = True
 
 
+def _guard_pairs(ids, weights, experts):
+    """ids [n, topk] (any int dtype) and weights [n, topk] -> int32 ids and fp32 weights, contiguous, with every pair
+    whose id is outside [0, experts) or whose weight is zero sent to expert 0 with weight 0; one Triton launch."""
+    n, topk = ids.shape
+    ids_out = torch.empty((n, topk), dtype=torch.int32, device=ids.device)
+    w_out = torch.empty((n, topk), dtype=torch.float32, device=ids.device)
+    if _guard_kernel is None:  # the CPU-only selftest: the same in torch
+        valid = (ids >= 0) & (ids < experts) & (weights != 0)
+        ids_out.copy_(torch.where(valid, ids, torch.zeros_like(ids)))
+        w_out.copy_(torch.where(valid, weights.float(), torch.zeros_like(weights, dtype=torch.float32)))
+        return ids_out, w_out
+    total = n * topk
+    block = 256
+    _guard_kernel[(triton.cdiv(total, block),)](ids.contiguous(), weights.contiguous(), ids_out, w_out, total, experts,
+                                                BLOCK=block)
+    return ids_out, w_out
+
+
 try:
     import triton
     import triton.language as tl
     from . import triton_ops as _tk
+
+    @triton.jit
+    def _guard_kernel(ids_ptr, w_ptr, ids_out_ptr, w_out_ptr, N, E, BLOCK: tl.constexpr):
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        live = offs < N
+        i = tl.load(ids_ptr + offs, mask=live, other=0).to(tl.int32)
+        w = tl.load(w_ptr + offs, mask=live, other=0.0).to(tl.float32)
+        ok = (i >= 0) & (i < E) & (w != 0.0)
+        tl.store(ids_out_ptr + offs, tl.where(ok, i, 0), mask=live)
+        tl.store(w_out_ptr + offs, tl.where(ok, w, 0.0), mask=live)
 
     @triton.jit
     def _b12x_push_kernel(y_ptr, pd0, pd1, pd2, pcnt_ptr, pf0, pf1, pf2, N, NSUM, PEERS_OUT: tl.constexpr, BLOCK: tl.constexpr):
@@ -166,3 +199,4 @@ try:
         _tk._fp4_push_arrive(pcnt_ptr, pf0, pf1, pf2, NSUM, PEERS_OUT)
 except ImportError:  # the CPU-only selftest
     _b12x_push_kernel = None
+    _guard_kernel = None

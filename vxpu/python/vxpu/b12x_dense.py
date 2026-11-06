@@ -146,6 +146,10 @@ def _plan(device, K, N, capacity, packed=None):
             try:
                 session.prepare((plan.request(name=f"vxpu.fp8_linear.{N}x{K}.m{capacity}", prepare_call=make_call,
                                               benchmark_call=make_call),))
+                # materialize the selected configuration while the session is open: closing it first discarded the
+                # prepared state, and require_prepared then took their default path (the heuristic tile, with the
+                # "was not prepared before its first use" line) for every plan since 207d3bc (found Nov 6, A120)
+                state = require_prepared(plan, "gemm.block_fp8_linear")
             except Exception as exc:
                 import threading
                 thread = threading.current_thread().name
@@ -155,11 +159,12 @@ def _plan(device, K, N, capacity, packed=None):
                 raise RuntimeError(f"b12x dense: the autotune of {capacity}x{K}->{N} failed on thread {thread} "
                                    f"(their session tunes only on the thread that made it; pre-warm the selection cache with "
                                    f"prewarm_b12x.py --from-sites and load with VXPU_B12X_CACHE_ONLY=1): {str(exc)[:160]}") from exc
-            session.close()  # the race's buffers go; the prepared plan stays
+            session.close()  # the race's buffers go; the materialized state is held in _plans
             _sessions.pop(device.index, None)
             torch.cuda.empty_cache()
             seconds["race_bytes"] = max(seconds.get("race_bytes", 0), torch.cuda.memory_allocated(device) - before)
-        state = require_prepared(plan, "gemm.block_fp8_linear")
+        else:
+            state = require_prepared(plan, "gemm.block_fp8_linear")  # no autotune: their default configuration
         _plans[key] = state
         _record_site(K, N, capacity)
         seconds["plan"] += time.perf_counter() - started
