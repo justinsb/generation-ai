@@ -7374,3 +7374,23 @@ kernel dumps); the attention and the gaps are the two classes where they lead by
 drafter the third; the expert node and the sums are ours or equal. Their all-reduce reads 70 to 90 us a site at the
 same rows, and our NCCL form in four processes read more than that (above), so the sum form is closed as a lever in
 either direction; the attention path and the drafter inside the step are the next run's items.
+
+**Their attention kernels in our step: what fits and what does not (Nov 6, 19:20 UTC, read from their source).**
+Their sparse-MLA decode (b12x attention.sparse_mla) takes q [rows, heads, 512] bf16, a rank-3 paged KV cache (pages x
+64 slots x record) with bf16 records allowed (Caps kv_dtype bf16; the dsv4 recipe's head_dim 512 = 448 nope + 64
+rope, v 512, our split), request-relative selected indices with a length per query, a float32 sink per head and a
+page table, through a prepared plan, bind and run (a PreparationSession per shape, compiled before capture; capture
+is supported). A dense bf16 [b, n, 512] cache with n a multiple of 64 is already that layout under an identity page
+table: no load-time conversion. What does not fit tonight: (1) vxpu::attn_select is lowerable, its Triton kernel
+inlined into the AOTI segments, so any other implementation changes every attention-bearing segment and rebuilds the
+packages (47 minutes a shape in one process; the four-process load builds the ranks in parallel); (2) our attention
+at a layer is one softmax over two caches, the window ring and the compressed cache, against their one paged cache
+and one selected set, so the op would concatenate the window slots and the compressed rows into one padded buffer
+each step and offset the indices (small at these contexts, a kernel pair a layer); (3) their indexer reads its own
+mxfp4 paged index cache written by their writer every step, a third cache format, so our index kernels would stay
+and the gain is bounded by the decode kernel: our attention core 5.1 ms against their unified decode 1.7 at 16 slots
+(45 us x 38), at most 3.4 ms of the 56.3 ms step, about 1,460 tok/s at fixed depth 7 against 1,370.9, under 1,538.9
+by construction; (4) our attn_core's fused epilogue (the rotate-back and the fp8 quant in the combine kernel) returns
+to aten launches. A gated number about 22:30 at best for a number that cannot reach the bar: recommended no-go for
+the night; the zero-rebuild piece for hero 16 is their decode kernel on random data at our shapes in a standalone
+bench (its time per call at 128 queries, its agreement with our Triton sparse_attn), about 45 minutes.
