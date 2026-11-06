@@ -7225,3 +7225,13 @@ puts their step at 43.1 ms (44.7 in r2). So at 16 streams code the tokens a step
 against 5.89) and the step is 7 to 9 ms longer (51.7 against 43 to 45), the sum kernels' spin on the slowest rank
 plus the drafter's extra; the skew trace measures the first. The fixed depth-7 arm on the 128-row program follows.
 
+**The fixed depth-7 arm settles the depth axis (Nov 6, pod C, tree88).** Every stream issues the drafter's seven every
+step on the 128-row program (plan f7flat: policy fixed, draft 7, shape flat, flat_rows 128): 1,370.9 tok/s aggregate
+at 56.27 ms median (55.44 mean), 7.0 issued, 5.12 accepted, 6.12 tokens a stream a step (conditional 0.928 0.935
+0.936 0.913 0.922 0.887 0.792), the 128-row flat 51.6 ms on 55 steps and the 8-row rectangle 48.3 on 29, text
+identical to the cost-model arm's. Their 6.06 to 6.14 tokens a stream a step are matched; by the step arithmetic (16
+x tokens over the step) the arm reads 1,740 against the cost model's 1,822 and the block-5 entry's 1,703, so at our
+per-row cost the full depth pays less per millisecond than the cost model's 5.8 issued. The whole remaining 16-stream
+code gap is the step at the same 128 rows: 55.4 ms against their 43 to 45. The skew trace, the per-rank timeline and
+the two fix arms (the lone cross-socket card as rank 3; the two-part push with the bf16 wire) run on that program.
+
