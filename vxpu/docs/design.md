@@ -7134,3 +7134,16 @@ in the code, off. The first-pair form's defaults now select the measured arm (th
 body), so VXPU_FP4_DIRECT_FIRST=1 alone is the arm; the gate/up K step 128 (108.0 against 116.5 us) is the one
 further lever that measured, a table knob for the entries.
 
+**The width routing, and the expert kernel at width (Nov 6, pod C).** The 16-stream trace (tree50, the budget plan
+over the flats of 48, 64 and 80 rows, 78 steps at 36.9 ms median) ran every step on the 80-row flat program: 480
+pairs a layer over 99.8 distinct experts (4.8 pairs an expert, 63 experts with two or more rows, 79 percent of the
+pairs could share a tile, up to 69 rows on one). At that width the pair count is above FP4_DIRECT_MAX (48), so the
+direct path and the first-pair form inside it are not taken and the GEMM form runs; on the TP4 slices it reads the
+472 MB of distinct bytes in 292 to 300 us a layer, 1.58 to 1.62 TB/s, the card's HBM floor: the expert kernel at
+width is byte-bound and the per-expert form has nothing to add there; its domain is the one-stream shapes (at most
+48 pairs). The finding at width is the placement: the EP4 shape the prose entries run (a card's quarter of whole
+experts, here 120 held pairs over 26.4 distinct) costs 431 to 439 us a layer for the same bytes, 1.13 to 1.16 TB/s,
+against the TP4 slices' 300: about 135 us a layer, 5.4 ms of the 35 ms 16-stream prose step (measured on the bench,
+inferred to the step) if the prose entries ran the experts as TP4 slices as the code entries do; a class (the K-split
+partials) the code entries already carry, and a plan choice. Both forms bit-identical in every pair.
+
