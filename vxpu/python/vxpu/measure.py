@@ -142,10 +142,17 @@ class _Job:
         self.groups = groups
         self.hc = int(c["epi"][2:]) if str(c.get("epi", "")).startswith("hc") else 0
         self.quant = c.get("epi") == "quant"
-        self.out_f32 = c.get("out") == "f32"
+        self.add_epi = c.get("epi") == "add"  # the plain epilogue adds a [M, N] fp32 term (the FFN's routed sum)
+        self.out_f32 = c.get("out") == "f32" or self.add_epi
+        # the rows a program holds: the class says how many row tiles it ran (tiles=T, the dispatcher's
+        # row_tiles(M, bm) above GEMV_ROWS_MAX rows), else one pass up to GEMV_ROWS_MAX; the kernel runs
+        # once per tile, the row-tile axis first in the grid (launch)
+        tiles_in_key = int(c.get("tiles", 0) or 0)
         self.bm = 16
-        while self.bm < min(M, T.GEMV_ROWS_MAX):  # past GEMV_ROWS_MAX rows the kernel runs tiled (launch)
+        while self.bm < min(M, T.GEMV_ROWS_MAX if not tiles_in_key else -(-M // tiles_in_key)):
             self.bm *= 2
+        if tiles_in_key and T.row_tiles(M, self.bm) != tiles_in_key:
+            raise ValueError(f"shape class {key!r}: {tiles_in_key} row tiles of {M} rows is no power-of-two tile")
         self.bn = int(blocks["BN"])
         self.bk = int(blocks["BK"])
         self.ks = int(blocks.get("KSPLIT", 1))
@@ -162,6 +169,7 @@ class _Job:
             else:
                 dt = torch.float32 if (self.out_f32 or self.ks > 1) else torch.bfloat16
                 self.y = torch.empty((self.ks, M, N) if self.ks > 1 else (M, N), dtype=dt, device=device)
+                self.add = torch.randn(M, N, device=device) if self.add_epi else None
         elif self.template == "dual_gemv_swiglu":
             self.y = (torch.empty(self.ks, 2, M, N, dtype=torch.float32, device=device) if self.ks > 1
                       else torch.empty(M, N, dtype=torch.bfloat16, device=device))
@@ -203,15 +211,17 @@ class _Job:
             if self.hc:
                 res, post, comb, add = self.residual, self.post, self.comb, self.add
             else:
-                res = post = comb = add = self.x
+                res = post = comb = self.x
+                add = self.add if self.add_epi else self.x
             R = N // self.groups
-            x = self.x  # the finish's and the peer stores' arguments, unused here (POST and PEERS_OUT off)
+            x = self.x  # the finish's, the peer stores' and the MXFP8 output's arguments, unused here (off)
+            # the dispatcher's launch (triton_ops.gemv_rows): the same positional arguments in the same order
             T._gemv_rows_kernel[T._grid(tiles, N // self.bn, self.ks)](
                 self.x, self.xq, self.xe, w, s_arg, self.y, res, post, comb, add, M, N, K, self.x.shape[1], R,
-                K // 32 if s is not None else 0, x, x, x, x, x, 1, 0.0, x, x, x, x, x, x, x,
+                K // 32 if s is not None else 0, x, x, x, x, x, 1, 0.0, x, x, x, x, x, x, x, x, x,
                 HAS_SCALE=s is not None, BM=self.bm, BN=self.bn, BK=self.bk,
-                EPI_QUANT=self.quant, KSPLIT=self.ks, EPI_HC=self.hc, HAS_ADD=bool(self.hc), NATIVE=self.native,
-                RECODE=False, MT=tiles > 1, PEERS_OUT=0, **opts)
+                EPI_QUANT=self.quant, KSPLIT=self.ks, EPI_HC=self.hc, HAS_ADD=bool(self.hc) or self.add_epi,
+                ADD_EXACT=not T.TP_PARTIALS_BF16, NATIVE=self.native, RECODE=False, MT=tiles > 1, PEERS_OUT=0, **opts)
         elif self.template == "dual_gemv_swiglu":
             w1, s1, w3, s3 = self.weights[i]
             T._dual_gemv_swiglu_kernel[T._grid(tiles, N // self.bn, self.ks)](
