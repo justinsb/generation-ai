@@ -7480,3 +7480,28 @@ the critical path over 40 layers and the heads, and 1.3 ms on the island's side 
 (vxpu-kernel-table/1, VXPU_PLAN_TABLE) enters the digest, so the dense segments rebuild once; BK 256 to 128 moves the
 fp32 accumulation order (a class), so the tuned run is gated on text. The dispatcher's defaults above 64 rows were
 the one-row tiles carried through the row-tiled form: BN 16 reads the 64-row x tile N / 16 times a call.
+
+**Their NCCL env in our four processes: the transport was the whole NCCL gap (Nov 6, 20:25 UTC).** F92-16c-deep7-fixed7-env
+(their launcher's env for this hardware verbatim: NCCL_P2P_LEVEL=SYS, NCCL_PROTO=LL,LL128,Simple, 16 channels, 2 MiB
+buffers, NCCL_IB_DISABLE=1, CUDA_DEVICE_MAX_CONNECTIONS=32, CUDA_DEVICE_ORDER=PCI_BUS_ID, the expandable-segments
+allocator): 1,522.9 tok/s at 55.27 ms a step, and 1,525.2 at 55.18 with NCCL_SHM_DISABLE=1 beside it as the loud check;
+text identical to the one-process arm; every hop "via P2P/CUMEM" on all 16 channels; the sum sites 86 to 87 us a
+site (from 152 under the default env; the one-process push 85; theirs 70 to 90). So the four-process form with
+NCCL is now within 1 ms a step of the one-process push form's step (55.2 against 56.3 the one-process fixed-7 arm)
+and ahead of it in tok/s (1,525 against 1,371). What the same stamps show next: the expert node in the 128-row
+program reads 704 to 706 us a layer under this env (27.9 ms), 667 under the default env (2 channels through host
+memory), 492 in one process (no NCCL kernels in the step); the main program's node 534 / 526 / 492 the same way;
+monotone with NCCL's resident channels, consistent with the ring kernels' CTAs and bandwidth overlapping the expert
+GEMMs, not yet proven (the 4-channel arm and a per-rank kernel table are the separation; the own push form across
+the processes, h15-ppr-ipc, failed before its first capture at triton_ops.ring_write, "Pointer argument cannot be
+accessed from Triton", on the IPC-mapped peer inbox, so it could not serve as the no-NCCL control tonight).
+
+**The expert fusions on the card (Nov 6, 20:35 UTC, h15-expert-fusion's bench beside the rebuild).** One layer's
+expert node at 128 rows (768 pairs over 128 TP4 slots), each FP4_FUSE_EPI arm as a captured graph's replay: arm 0
+509.5 us (gate/up 322.0, down 147.4, the small kernels 31.1, 9 launches); bit 1 (the schedule looks the slots up)
+502.0, identical to arm 0; bits 1+2 (the SwiGLU and the per-32 quant as the gate/up epilogue) 498.4, identical, 5
+launches; bits 1+2+4 (the token sum as the down epilogue) 512.1 and a rounding class (67 elements at 2.4e-4): the
+down GEMM reads 179.9 against 147.4 with the epilogue, more than the 11 us of fill and reduce it removes; bit 8 (the
+down as a PDL dependent) the same wall; the Nov 5 fold 629. Every arm including arm 0 differs from the direct
+kernels by 16 at about 1.6 percent of the elements, the GEMM form's known class. So FP4_FUSE_EPI=3 is exact and worth
+11 us a layer; it runs as the knob entry on the tuned run's packages.
