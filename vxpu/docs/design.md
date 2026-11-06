@@ -7515,3 +7515,18 @@ four processes. Stamped per rank: the main program 50.4 ms against 52.8 (the att
 span; the island class 2.4 against 13.2 ms, now 35 us a layer serial; attention core 120 against 128 us), the 128-row
 program 57.2 against 59.5, the sum sites unchanged at 151 us (the default transport). So the tiles are worth 1.75 ms
 a step at 128 rows, the sweep's on-paper 1.4 plus the island; the same table with their NCCL env follows as F93b.
+
+**The tiles and their NCCL env together (Nov 6, 21:12 UTC): the four-process entry passes the entry of record.**
+F93b-16c-deep7-fixed7-tuned-env (four processes, the 16-entry table, their NCCL env at 16 channels, the fused mix,
+fixed depth 7, 16 streams code, stamps on): 1,549.9 tok/s at 52.71 ms a step (79 steps, 5.11 accepted of 7), text
+identical to the one-process arm and to both single-change arms; above the block-5 entry of record's 1,538.9 and
+3.6 ms a step under the one-process fixed-7 step (56.27, 1,370.9). The deltas composed: 55.18 (the env alone) less
+the tiles' 1.75 predicts 53.4, read 52.7. Stamped per rank: the main program 44.17 ms (experts 508 us a layer, sum
+sites 86 us x 89, attention core 4.98 ms, ffn front 3.69, projections 31 us a launch, hc front 1.95, island 35 us a
+layer serial), the 128-row program 51.19 (experts 647), the drafter's program 2.28. The 4-channel arm of the env
+alone (F92-16c-deep7-fixed7-env-ch4) read 54.17 ms against 55.18 at 16 channels with the sites at 79 to 80 us and the
+expert node 655 against 705 us a layer in the 128-row program (508 against 534 in the main): the node tracks NCCL's
+resident channels, a residue of about 160 us a layer above the one-process node (492) remaining with NCCL present.
+Its harness rate (1,426.6) sits below F92's through the acceptance draw (84 steps against 77 at identical text); the
+step is the comparison. The pod A agent's d2 reads 147 us a site under the same env with all four cards on one socket
+(bus 05, 06, 0A, 0B) against C's split (05, 85, 89, 8A).
