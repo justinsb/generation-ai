@@ -265,12 +265,20 @@ class GemmFuseTest(unittest.TestCase):
 
     def test_the_lookup_needs_the_expert_ids(self):
         ids = object()
-        self.assertEqual(T._fp4_fuse(ids, False, 1, 1, 32, bits=0), (False, False))
-        self.assertEqual(T._fp4_fuse(ids, False, 1, 1, 32, bits=1), (True, False))
-        self.assertEqual(T._fp4_fuse(None, False, 1, 1, 32, bits=1), (False, False))
+        self.assertEqual(T._fp4_fuse(ids, False, 1, 1, 32, bits=0), (False, False, False))
+        self.assertEqual(T._fp4_fuse(ids, False, 1, 1, 32, bits=1), (True, False, False))
+        self.assertEqual(T._fp4_fuse(None, False, 1, 1, 32, bits=1), (False, False, False))
 
     def test_the_epilogue_needs_an_unsplit_k_and_whole_quant_blocks(self):
-        self.assertEqual(T._fp4_fuse(None, True, 1, 1, 32, bits=2), (False, True))  # no ids needed, per-pair fine
-        self.assertEqual(T._fp4_fuse(None, False, 2, 1, 32, bits=2), (False, False))  # a K split: g and u are fp32 slabs
-        self.assertEqual(T._fp4_fuse(None, False, 1, 1, 16, bits=2), (False, False))  # a 16-row tile splits a 32-block
-        self.assertEqual(T._fp4_fuse(object(), False, 1, 1, 64, bits=3), (True, True))
+        self.assertEqual(T._fp4_fuse(None, True, 1, 1, 32, bits=2), (False, True, False))  # no ids needed, per-pair fine
+        self.assertEqual(T._fp4_fuse(None, False, 2, 1, 32, bits=2), (False, False, False))  # a K split: g and u are fp32 slabs
+        self.assertEqual(T._fp4_fuse(None, False, 1, 1, 16, bits=2), (False, False, False))  # a 16-row tile splits a 32-block
+        self.assertEqual(T._fp4_fuse(object(), False, 1, 1, 64, bits=3), (True, True, False))
+
+    def test_the_sum_needs_the_ids_an_unsplit_i_and_a_summed_reply(self):
+        ids = object()
+        self.assertEqual(T._fp4_fuse(ids, False, 1, 1, 32, bits=4), (False, False, True))
+        self.assertEqual(T._fp4_fuse(ids, True, 1, 1, 32, bits=4), (False, False, False))  # per-pair replies
+        self.assertEqual(T._fp4_fuse(ids, False, 1, 2, 32, bits=4), (False, False, False))  # an I split: slabs to sum
+        self.assertEqual(T._fp4_fuse(None, False, 1, 1, 32, bits=4), (False, False, False))  # no ids: no held count
+        self.assertEqual(T._fp4_fuse(ids, False, 1, 1, 32, bits=7), (True, True, True))

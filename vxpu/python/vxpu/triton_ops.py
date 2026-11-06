@@ -3153,8 +3153,9 @@ if triton is not None:
         and the caller sums and rounds them). The folds (hero run 15): FUSE_H makes h itself from
         the gate/up outputs in every K step (w * silu(g) * u rounded and quantized per 32 as
         _swiglu_quant_kernel does: that kernel and h's round trip are gone); SUM adds the token's
-        replies in k order through _fp4_down_finish from the last of its pairs' programs on this
-        row tile (the combine and the per-pair reply's round trip are gone); WAIT makes the kernel a
+        held replies in k order, fp32, from the last of its pairs' programs on this row tile
+        (FP4_FUSE_EPI bit 4 and the fold: the zeroed reply buffer and the aten reduce after the
+        kernel are gone; the per-pair replies stay in d as the sum's scratch); WAIT makes the kernel a
         dependent launch that spins on its block's arrival counter until the block's gate/up
         programs have stored (the direct kernels' FP4_PDL=2 for this form; the last of the block's
         down programs zeroes the counters)."""
@@ -3217,17 +3218,33 @@ if triton is not None:
                 acc = tl.dot_scaled(h, None, "bf16", tl.trans(b2), e2, "e2m1", acc)
             else:
                 acc = tl.dot(h, tl.trans(_fp4_tile(w2_ptr, s2_ptr, bank_rows, live_n, k0, I // 2, I // 32, BN, BK, i_hi)), acc)
-        if SUM:  # each pair's row finished as the direct kernel finishes a pair: its reply stored, the token summed by the last
-            mrow = tl.arange(0, BM)
-            for r in tl.static_range(BM):
-                if r < cnt:
-                    p = tl.sum(tl.where(mrow == r, pairs, 0), 0)
-                    t = (p // TOPK).to(tl.int64)
-                    arrivals = 0
-                    for kk in range(TOPK):
-                        arrivals += (tl.load(map_ptr + tl.load(idx_ptr + t * TOPK + kk) - start) >= 0).to(tl.int32)
-                    _fp4_down_finish(idx_ptr, map_ptr, start, d_ptr, cnt_ptr, y_ptr, tl.where(mrow[:, None] == r, acc, 0.0),
-                                     p, t, tile, rows, live_n, D, TOPK, NT, ks2, PAIRS, BN, True, KS2, arrivals * KS2, True)
+        if SUM:
+            # The token sum as the epilogue (FP4_FUSE_EPI bit 4; KS2 is 1 here). Each pair's reply, rounded to bf16 as
+            # the module rounds it, goes to its row of d; then one arrival per live row on the (token, row tile)
+            # counter, and the program whose arrival completes a token's held pairs adds those pairs' rows of d in k
+            # order from zero, fp32 (the combine kernel's and the direct kernels' order), stores the token's row of y
+            # and zeroes the counter for the next launch. The rows of other programs are read past L1 (.cg) after
+            # the acquire. Rows of tokens with no held pair are never written: the caller zeroes y.
+            mask = live_m[:, None] & live_n[None, :]
+            tl.store(d_ptr + prow[:, None] * D + rows[None, :], acc.to(tl.bfloat16).to(tl.float32), mask=mask)
+            tl.debug_barrier()
+            tok = pairs // TOPK
+            held = tl.zeros((BM,), dtype=tl.int32)
+            for kk in range(TOPK):
+                e = tl.load(idx_ptr + tok * TOPK + kk, mask=live_m, other=0)
+                held += (tl.load(map_ptr + e - start, mask=live_m, other=-1) >= 0).to(tl.int32)
+            old = tl.atomic_add(cnt_ptr + tok * NT + tile, 1, mask=live_m, sem="acq_rel")
+            last = live_m & (old == held - 1)
+            tl.debug_barrier()  # the rows below are read by every thread, after the thread that arrived last acquired
+            y = tl.zeros((BM, BN), dtype=tl.float32)
+            for kk in range(TOPK):
+                e = tl.load(idx_ptr + tok * TOPK + kk, mask=last, other=0)
+                hk = last & (tl.load(map_ptr + e - start, mask=last, other=-1) >= 0)
+                row = (tok.to(tl.int64) * TOPK + kk) * D
+                y += tl.load(d_ptr + row[:, None] + rows[None, :], mask=hk[:, None] & live_n[None, :], other=0.0,
+                             cache_modifier=".cg")
+            tl.store(y_ptr + tok.to(tl.int64)[:, None] * D + rows[None, :], y, mask=last[:, None] & live_n[None, :])
+            tl.atomic_xchg(cnt_ptr + tok * NT + tile, 0, mask=last)
         else:
             mask = live_m[:, None] & live_n[None, :]
             if KS2 > 1:
@@ -4613,10 +4630,13 @@ def _fp4_fuse(indices, per_pair, KS, KS2, bn1, bits=None):
     """The GEMM form's fusions in effect for a call (FP4_FUSE_EPI's bits, each only where its
     conditions hold): lookup (bit 1: the schedule's kernel looks the slots up; needs the expert
     ids), epi (bit 2: the SwiGLU and quantization as the gate/up kernel's epilogue; needs an
-    unsplit K and a row tile of whole 32-blocks). Returns (lookup, epi)."""
+    unsplit K and a row tile of whole 32-blocks), summed (bit 4: the token sum as the down
+    kernel's epilogue; needs the ids, an unsplit I and a summed reply). Returns (lookup, epi,
+    summed)."""
     bits = int(FP4_FUSE_EPI) if bits is None else int(bits)
     ids = indices is not None
-    return bool(bits & 1) and ids, bool(bits & 2) and KS == 1 and bn1 % 32 == 0
+    return (bool(bits & 1) and ids, bool(bits & 2) and KS == 1 and bn1 % 32 == 0,
+            bool(bits & 4) and ids and KS2 == 1 and not per_pair)
 
 
 def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit, per_pair, indices, start, native):
@@ -4640,7 +4660,7 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
     # replies itself (the combine gone), and runs as a dependent launch on per-block arrivals (FP4_PDL)
     fold = FP4_GEMM_FOLD and indices is not None and KS2 == 1
     # the fusions (FP4_FUSE_EPI, hero run 15, Nov 6); the fold is the earlier form and takes none of them
-    lookup, epi = _fp4_fuse(indices, per_pair, KS, KS2, bn1) if not fold else (True, False)
+    lookup, epi, summed = _fp4_fuse(indices, per_pair, KS, KS2, bn1) if not fold else (True, False, not per_pair)
     mode = _fp4_pdl_mode() if fold else 0
     pdl, wait = mode > 0, mode == 2
     idx = indices.contiguous().view(-1) if indices is not None else None
@@ -4667,16 +4687,17 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
         u = torch.empty(pairs, I, dtype=torch.bfloat16, device=dev)
     if fold:
         h = g  # with the fold h is never stored
-    # 0 for the pairs not held here (with a split, one slab per slice)
-    d = torch.zeros((KS2, pairs, K) if KS2 > 1 else (pairs, K), dtype=torch.float32, device=dev)
+    if summed:  # the per-pair replies are the sum's scratch: every row read is one a program wrote
+        d = torch.empty(pairs, K, dtype=torch.float32, device=dev)
+    else:  # 0 for the pairs not held here (with a split, one slab per slice)
+        d = torch.zeros((KS2, pairs, K) if KS2 > 1 else (pairs, K), dtype=torch.float32, device=dev)
     _keep(g, u, h, d)
     x = x_in.contiguous()
     wt = weights.to(torch.float32).contiguous().view(-1)
     tma = native and _fp4_tma(dev.index) and (K // 2) % 16 == 0 and (I // 2) % 16 == 0
-    summed = fold and not per_pair
     nt = triton.cdiv(K, bn2)
     if summed:
-        y = torch.empty(n, K, dtype=torch.float32, device=dev)
+        y = torch.zeros(n, K, dtype=torch.float32, device=dev)  # 0 for a token with no pair held here
         counters = _fp4_counters(dev, n * nt)
         _keep(y)
     arrive = _fp4_counters(dev, 2 * blocks, tag="arrive-gemm") if wait else order
@@ -4693,17 +4714,17 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
             x, order, blk_slot, blk_first, blk_count, d1, s1.view(torch.uint8), d3, s3.view(torch.uint8), g, u,
             I, K, topk, pairs, BM=bm, BN=bn1, BK=bk1, NATIVE=native, TMA=tma, KS=KS, arrive_ptr=arrive, PDL=pdl,
             ARRIVE=wait, h_ptr=h, wt_ptr=wt, limit=float(swiglu_limit), EPI=epi, num_warps=warps1, num_stages=stages1)
-        if not fold:
-            if not epi:
-                _swiglu_quant_kernel[(triton.cdiv(I // 32, 16), pairs)](g, u, wt, slot, h, I, float(swiglu_limit), G=16,
-                                                                      KS=KS, PAIRS=pairs)
+        if not (fold or epi):
+            _swiglu_quant_kernel[(triton.cdiv(I // 32, 16), pairs)](g, u, wt, slot, h, I, float(swiglu_limit), G=16,
+                                                                  KS=KS, PAIRS=pairs)
+        if not (fold or summed):
             _fp4_gemm_down_kernel[(blocks, nt, KS2)](
                 h, order, blk_slot, blk_first, blk_count, d2, s2.view(torch.uint8), d, K, I, pairs, BM=bm, BN=bn2, BK=bk2,
                 NATIVE=native, TMA=tma, KS2=KS2, num_warps=warps2, num_stages=stages2)
         else:
             _fp4_gemm_down_kernel[(blocks, nt, 1)](
                 h, order, blk_slot, blk_first, blk_count, d2, s2.view(torch.uint8), d, K, I, pairs, BM=bm, BN=bn2, BK=bk2,
-                NATIVE=native, TMA=tma, KS2=1, g_ptr=g, u_ptr=u, wt_ptr=wt, limit=float(swiglu_limit), KS=KS, FUSE_H=True,
+                NATIVE=native, TMA=tma, KS2=1, g_ptr=g, u_ptr=u, wt_ptr=wt, limit=float(swiglu_limit), KS=KS, FUSE_H=fold,
                 idx_ptr=idx, map_ptr=smap, start=start, cnt_ptr=counters if summed else d, y_ptr=y if summed else d,
                 TOPK=topk, NT=nt, SUM=summed, arrive_ptr=arrive, NEED=2 * nt1 * KS, NBLOCKS=blocks, PDL=pdl, WAIT=wait,
                 num_warps=warps2, num_stages=stages2, launch_pdl=pdl)
