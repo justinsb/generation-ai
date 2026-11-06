@@ -911,7 +911,7 @@ class StepGraph(torch.nn.Module):
         if triton_ops.EMBED_ROWS_FORM == "push":
             for node in graph.nodes:
                 if node.kind == "embed_rows":
-                    out = runner.inboxes.get((node.name, 0, dev))
+                    out = runner.inboxes.get((node.name, None, dev), runner.inboxes.get((node.name, 0, dev)))  # the fanout's index: None for a single output
                     if out is not None:
                         self.world.buffers(("embed_out", self._xkey(node.name)), torch.empty_like(out))
                         self.world.buffers(("embed_flag", self._xkey(node.name)),
