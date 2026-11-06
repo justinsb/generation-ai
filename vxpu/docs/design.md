@@ -7622,7 +7622,10 @@ to F93c and W88: the median of three 1,648.4 at 51.59, 1.1 percent on F93c. The 
 against 42.81 (experts 481 against 483 us a layer, island 280 against 283, sites 79 in both, attention core 119
 against 120, projections 32 against 31), the 128-row program 49.39 against 49.55: the two pieces are worth about 0.35
 ms a step here, where on d2 they were measured against the default tiles and 147-us sums. The 16-stream code entry in
-four processes stands at 1,648.4 tok/s at 51.59 ms (median of three).
+four processes stands at 1,648.4 tok/s at 51.59 ms (median of three). The bar for every number here is what their
+server read on these cards, the higher of its two waves: prose 254.1 / 827.2 / 1,238.7 and code 519.3 / 1,247.5 /
+1,938.2 tok/s at 1 / 8 / 16 streams (no published numbers, no lower waves, no midpoints); F97 is 85.0 percent of the
+1,938.2.
 
 **The island's overlap at 128 rows (Nov 6, 22:39 UTC).** F99-16c-deep7-fixed7-fullstack-serial (F97 with
 VXPU_PARALLEL_BRANCHES=0): 1,599.2 tok/s at 53.06 ms (76 steps, 5.15 accepted), text identical: serializing the
