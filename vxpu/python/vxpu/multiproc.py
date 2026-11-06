@@ -88,9 +88,25 @@ def _check(rc, what):
         raise RuntimeError(f"multiproc: {what} failed: {_lib().ncclGetErrorString(rc).decode()} ({rc})")
 
 
-def init(timeout=600.0):
-    """This process's communicator: rank 0 writes the unique id to VXPU_MP_UID, the others wait for
-    it, every rank joins; then the warm-up collectives. Idempotent."""
+def write_uid():
+    """Rank 0's unique id to VXPU_MP_UID, at process start (the launcher): the peers' wait for it then
+    overlaps rank 0's load, however long that is. Idempotent; the other ranks do nothing."""
+    if rank() != 0:
+        return
+    path = os.environ["VXPU_MP_UID"]
+    if os.path.exists(path) and os.path.getsize(path) == 128:
+        return
+    torch.cuda.set_device(0)
+    uid = _UniqueId()
+    _check(_lib().ncclGetUniqueId(ctypes.byref(uid)), "ncclGetUniqueId")
+    with open(path + ".tmp", "wb") as f:
+        f.write(ctypes.string_at(ctypes.addressof(uid), 128))  # all 128 bytes: a c_char array reads as a C string
+    os.replace(path + ".tmp", path)
+
+
+def init(timeout=7200.0):
+    """This process's communicator: the unique id rank 0 wrote to VXPU_MP_UID (write_uid, at its start
+    or here), every rank joins; then the warm-up collectives. Idempotent."""
     global _COMM, _RANK, _WORLD
     if _COMM is not None:
         return
@@ -98,20 +114,16 @@ def init(timeout=600.0):
     torch.cuda.set_device(_RANK)
     lib = _lib()
     path = os.environ["VXPU_MP_UID"]
+    write_uid()
     uid = _UniqueId()
-    if _RANK == 0:
-        _check(lib.ncclGetUniqueId(ctypes.byref(uid)), "ncclGetUniqueId")
-        with open(path + ".tmp", "wb") as f:
-            f.write(bytes(uid.b))
-        os.replace(path + ".tmp", path)
-    else:
-        deadline = time.time() + timeout
-        while not (os.path.exists(path) and os.path.getsize(path) == 128):
-            if time.time() > deadline:
-                raise RuntimeError(f"multiproc: rank {_RANK} waited {timeout:.0f} s for the unique id at {path}")
-            time.sleep(0.05)
-        with open(path, "rb") as f:
-            uid.b = f.read(128)
+    deadline = time.time() + timeout
+    while not (os.path.exists(path) and os.path.getsize(path) == 128):
+        if time.time() > deadline:
+            raise RuntimeError(f"multiproc: rank {_RANK} waited {timeout:.0f} s for the unique id at {path}")
+        time.sleep(0.05)
+    with open(path, "rb") as f:
+        data = f.read(128)
+    ctypes.memmove(ctypes.addressof(uid), data, 128)
     comm = ctypes.c_void_p()
     started = time.perf_counter()
     _check(lib.ncclCommInitRank(ctypes.byref(comm), _WORLD, uid, _RANK), f"ncclCommInitRank rank {_RANK}")
