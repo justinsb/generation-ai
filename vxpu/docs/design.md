@@ -7537,3 +7537,14 @@ step is the comparison. The pod A agent's d2 reads 147 us a site under the same 
 nothing else moved. The stack in four processes: 1,569.9 at 52.07 against the one-process fixed-7 arm's 1,370.9 at
 56.27 and the block-5 entry of record's 1,538.9 at 39.3; the four changes compose on the stamps (the transport 66 us
 a site, the tiles 1.75 ms, the fusions 0.64, the host hop 1.8 and the drafter's program 2.5 against 4.9 in one process).
+
+**The own push form across the processes (Nov 6, 21:28 UTC), and the expert node's residue placed.**
+P92b-16c-deep7-fixed7-push (h15-ppr-ipc fd3b4d6: the push and scatter sums over CUDA IPC, every peer buffer opened
+under the rank's own context): 1,374.1 tok/s at 56.20 ms a step (84 steps, 5.12 accepted), text identical. The sum
+sites read 84 to 85 us a site, the one-process push form's figure, so the mapping costs nothing; the embedding's push
+across processes costs 278 us a call in the main program and 1,479 in the drafter's (93 under NCCL's all-reduce of
+the rows), which is why the step trails NCCL at 4 channels (54.17). The expert node reads 664 us a layer in the
+128-row program with no NCCL kernel in the step (NCCL at 4 channels 655, at 16 channels 705, one process 492): the
+residue of 160 to 170 us a layer belongs to the four-process form itself, not to NCCL's channels (which move it by
+50). The per-rank kernel table inside the node is the next instrument; the candidates are the per-process expert
+pool's slot map against the four-pool map and the per-process allocator's placement of the pools.
