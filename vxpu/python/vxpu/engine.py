@@ -1566,7 +1566,8 @@ class Engine:
                                            block, scale, lengths, budget, cost_rows, cost_draft, chosen_depths, out, account, dump,
                                            adaptive=adaptive, window=window, seen_acc=seen_acc, depth0=depth,
                                            flat_sizes=flat_sizes, fill=policy.fill if flat else None,
-                                           slots=flat and policy.policy == speculation.SLOTS)
+                                           slots=flat and policy.policy == speculation.SLOTS,
+                                           cost_model=flat and policy.cost_model)
                         break
                     if fixed and logits_sink is None and self._tp_spec_fixed_ready(S):
                         # the fixed shape: from here the drafter's and the verify's graphs chain on the stream and the
@@ -1611,7 +1612,8 @@ class Engine:
                         drafts.append(row[:block])
                     live = [i for i in range(R) if not done[i]]
                     layout = (self._flat_layout(issued, rows_out, live, flat_sizes, policy.fill, policy.policy == speculation.SLOTS,
-                                                R, S, max_draft, block, scale, account) if flat_sizes else None)
+                                                R, S, max_draft, block, scale, cost_model=policy.cost_model, account=account)
+                              if flat_sizes else None)
                     if layout is not None:  # the flat shape: the rows one token each in a flat program (hero run 15)
                         T, lay_seq, lay_rank, issued = layout
                         vrows, vkey = S, f"flat{T}"
@@ -1891,74 +1893,68 @@ class Engine:
             p *= min(1.0, max(0.0, rows_out[i][block + q] / scale)) if scale else 1.0
         return p
 
-    def _flat_layout(self, issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale, account=None):
+    def _flat_layout(self, issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale, cost_model=False,
+                     account=None):
         """The flat token-row verify's program and rows for a step (hero run 15): the smallest program of `flat_sizes`
         that fits the policy's depths (each live row its token then its issued drafts), its spare rows filled by
         `fill`: "drafts" gives them to the next drafts with the highest survival, in order, which keeps every row's
         drafts a prefix (the fork's budgeted slot selection over the spare), "pad" to repeats of the row's token at
         the positions after its drafts, which the acceptance ignores (the rectangle's padding on fewer rows). With
         `slots` the depths are the selection itself: every live row its token, the rest of the program to the drafts
-        with the highest survival. Rows that are done fill a row each when nothing else does; a program that cannot
-        be filled gives way to the next. Returns (T, the rows' sequences, the rows' ranks, the issued counts), the
-        rows sorted by (sequence, rank), or None when no program fits (the caller runs the per-length program).
-
-        With `slots` over several programs the budget is chosen per step by the cost model (hero run 15, the fork's
-        adaptive verification): each program's expected tokens under the selection (the live rows plus the sum of the
-        highest survivals its spare rows take) over its measured step time (the drafter's call plus the program's
-        median from `account`), every program tried once first to seed the costs, as the budget policy does; the
-        programs are then tried best first."""
-        n_live = len(live)
-        if slots:
-            cands = sorted(((self._survival(rows_out, i, k, block, scale), -i, i, k) for i in live for k in range(max_draft)),
-                           reverse=True)
-            fits = [n for n in flat_sizes if n >= n_live]
-            order = fits
-            if len(fits) > 1 and account is not None and n_live:
-                import statistics as _st
-                prefix = [0.0]
-                for v, _, _, _ in cands:
-                    prefix.append(prefix[-1] + v)
-                untried = [n for n in fits if not account["verify_ms"].get(f"flat{n}")]
-                if untried:
-                    order = untried[:1] + [n for n in fits if n != untried[0]]
-                else:
-                    d_ms = _st.median(account["draft_ms"]) if account["draft_ms"] else 2.5
-
-                    def rate(n):
-                        take = min(n - n_live, len(cands))
-                        return (n_live + prefix[take]) / (d_ms + _st.median(account["verify_ms"][f"flat{n}"]))
-                    order = sorted(fits, key=rate, reverse=True)
-        else:
-            need = sum(1 + issued[i] for i in live)
-            order = [n for n in flat_sizes if n >= need]
-        for T in order:
-            counts = {i: 1 for i in live} if slots else {i: 1 + issued[i] for i in live}
-            got = [0] * R if slots else list(issued)
+        with the highest survival. Rows that are done fill a row each when nothing else does. Returns (T, the rows'
+        sequences, the rows' ranks, the issued counts), the rows sorted by (sequence, rank), or None when no program
+        fits (the caller runs the per-length program). With `cost_model` (and `slots`) the program is the one whose
+        slot fill gives the most expected accepted tokens per millisecond: the live rows plus the survival of every
+        draft the fill admits, over the drafter's measured call plus the program's measured time (the account's
+        medians; a program not yet timed is taken once to seed it), the cost-model budget over the flat programs
+        (hero run 15, the deep budget: their verifier spends a global budget from a step-cost model, and the smallest
+        program that fits stops at the drafter's depth or below it)."""
+        counts0 = {i: 1 for i in live} if slots else {i: 1 + issued[i] for i in live}
+        issued0 = [0] * R if slots else list(issued)
+        need = sum(counts0.values())
+        sizes = [n for n in flat_sizes if n >= need]
+        if not sizes:
+            return None
+        cands = sorted(((self._survival(rows_out, i, k, block, scale), -i, i, k)
+                        for i in live for k in range(issued0[i], max_draft)), reverse=True) if (slots or fill == "drafts") else []
+        T = sizes[0]
+        if cost_model and slots and account is not None and len(sizes) > 1:
+            import statistics as _st
+            timed = {n: account["verify_ms"].get(f"flat{n}") for n in sizes}
+            untried = [n for n in sizes if not timed[n]]
+            if untried:
+                T = untried[0]
+            else:
+                d_ms = _st.median(account["draft_ms"][-64:]) if account["draft_ms"] else 2.0
+                best = None
+                for n in sizes:
+                    tokens = len(live) + sum(sv for sv, _, _, _ in cands[:n - need])
+                    score = tokens / (d_ms + _st.median(timed[n][-64:]))
+                    if best is None or score > best[0]:
+                        best = (score, n)
+                T = best[1]
+        counts, issued = dict(counts0), list(issued0)
+        spare = T - need
+        if spare and (slots or fill == "drafts"):
+            for _, _, i, k in cands[:spare]:
+                issued[i] += 1
+                counts[i] += 1
             spare = T - sum(counts.values())
-            if spare and (slots or fill == "drafts"):
-                if not slots:
-                    cands = sorted(((self._survival(rows_out, i, k, block, scale), -i, i, k)
-                                    for i in live for k in range(got[i], max_draft)), reverse=True)
-                for _, _, i, k in cands[:spare]:
-                    got[i] += 1
-                    counts[i] += 1
-                spare = T - sum(counts.values())
-            for i in sorted(live, key=lambda i: counts[i]):  # padding, a row holding at most S positions
-                while spare and counts[i] < S:
-                    counts[i] += 1
-                    spare -= 1
-            for i in range(R):  # then the rows that are done, one row each
-                if spare and i not in counts:
-                    counts[i] = 1
-                    spare -= 1
-            if spare:
-                continue
-            seq, rank = [], []
-            for i in sorted(counts):
-                seq += [i] * counts[i]
-                rank += list(range(counts[i]))
-            return T, seq, rank, got
-        return None
+        for i in sorted(live, key=lambda i: counts[i]):  # padding, a row holding at most S positions
+            while spare and counts[i] < S:
+                counts[i] += 1
+                spare -= 1
+        for i in range(R):  # then the rows that are done, one row each
+            if spare and i not in counts:
+                counts[i] = 1
+                spare -= 1
+        if spare:
+            return None
+        seq, rank = [], []
+        for i in sorted(counts):
+            seq += [i] * counts[i]
+            rank += list(range(counts[i]))
+        return T, seq, rank, issued
 
     def _tp_spec_half_ready(self, lengths, flat_sizes=()):
         """Whether the half-fixed shape can start: the sharded drafter's rank graphs are captured and its output lives
@@ -1974,7 +1970,8 @@ class Engine:
 
     def _tp_spec_half(self, R, n_rows, S, first, pos, tokens, done, max_new_tokens, max_draft, min_conf, block, scale,
                       lengths, budget, cost_rows, cost_draft, chosen_depths, out, account, dump=None,
-                      adaptive=False, window=0, seen_acc=None, depth0=None, flat_sizes=(), fill=None, slots=False):
+                      adaptive=False, window=0, seen_acc=None, depth0=None, flat_sizes=(), fill=None, slots=False,
+                      cost_model=False):
         """The drafted step in its half-fixed shape (hero run 15): the verify's per-length program is still chosen on
         the host from the drafter's confidences (the confidence floor or the budget policy), but the step's acceptance
         runs on rank 0's device as in the fixed shape, the drafter's and the verify's input buffers are written on the
@@ -2025,7 +2022,8 @@ class Engine:
         seen_acc = seen_acc if seen_acc is not None else []
 
         def flat_layout(issued, rows_out, live):
-            return self._flat_layout(issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale, account)
+            return self._flat_layout(issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale,
+                                     cost_model=cost_model, account=account)
 
         def policy_depths(rows_out, live):
             # the host loop's rules on the drafter's rows: the confidence floor per row, the budget policy's common depth, or

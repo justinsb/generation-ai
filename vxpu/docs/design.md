@@ -7250,6 +7250,65 @@ tensors go back to the host (engine._release_whole_dense), so every card holds 3
 framework item: the planner should read each card's resident bytes after placement and re-place or refuse before a
 width run, and the loader should slice from the host so no card ever holds the whole model at load.
 
+**The league table at the close of hero 15 (Nov 6, 10:30 UTC; two readings still running).** Their numbers are the
+vLLM fork measured on our four cards by the vllm-ref pod, the league method (one prompt a case, the decode window).
+One stream, prose: the five-row fp8-head drafter under the cost-model budget (plan b4h, programs 1 to 4, TP4
+experts, PDL, no wire knob) reads 263.2 / 267.1 / 271.7 tok/s over three runs at 10.80 to 10.97 ms and 2.88 to 3.01
+tokens a step against 254: over the bar on every run, 105 percent by the median. The budget picks its rows from live
+timings, so its tokens differ run to run (the repeat gate reads the same class); the fixed five-row shape on the
+same bytes reads 263.3 deterministic. One stream, code: the block-7 drafter under the budget (plan b7h, programs 1
+to 7) 470.7 / 468.6 with identical text, 14.32 ms and 6.452 a step, against 519 (90.7 percent); the fixed eight-row
+shape 465.1 / 464.6 beside it. Eight streams: the fold (the bf16 wire carried by the fused push, 6f18650) over the
+slots/budget plan on the flat programs 8 to 40: prose 798.7 / 807.1 at 25.5 to 25.7 ms and 2.55 to 2.60 a row
+against 827 (97.6 percent), code 1,125.9 / 1,141.9 with identical text at 27.5 to 27.7 ms and 3.88 to 3.96 a row
+against 1,248 (91.5 percent); the cast-node form of the same wire read 772.8 / 1,132.3 and the knob-less budget
+748.3. Sixteen streams, prose: the rectangle (plan b4h on the b16 artifact, the four per-length verifies, no flats)
+with the fused wire on tree50 reads 1,248.5 / 1,182.7 / 1,242.2 over three runs at 32.5 to 33.3 ms, median 1,242.2
+against 1,235 (100.6 percent, two of three runs over; the thin form of the wire on the same rectangle 1,209.0 at
+33.6 ms, and the fold over the flats 48 / 64 / 80 1,174.6); the text variation between runs is the budget's picks
+(runs 2 and 3 share a text and differ 5 percent in throughput), the throughput band is step time. Sixteen streams,
+code: the fold 1,538.9 at 40.3 ms and 3.88 a row against 1,845 (83.4 percent); the thin-form rectangle 1,536.0 the
+same class; the fused form on the rectangle 1,487.6 / 1,479.3 / 1,483.7 with identical text, a reproducible 3 to 4
+percent under the thin form on code. So two entries sit over their bars (one-stream prose and sixteen-stream
+prose), the other four at 83 to 98 percent, and the 16-stream code entry is the far one. The 132-prompt lines on
+the two one-stream arms: the five-row budget 231.9 tok/s decode at 10.36 ms and 2.401 a step over 132 prompts of
+256 tokens (end to end 180.0), the block-7 budget 226.7 at 10.58 and 2.399 (end to end 176.6), against the earlier
+drafter bytes' 217.1; the line harness records per-prompt counts, not tokens, so the lines compare throughput and
+acceptance across prompts, not text.
+
+**What the day's arms said (Nov 6).** The knobs' sign depends on rows: the bf16 wire alone costs nothing on the
+one-stream step (+0.06 ms at fixed five rows) and moves the class there (248.1 against 263 to 267 prose), and gains
+3 to 7 percent at 8 and 16 streams, so it is on at width and off at one stream; the one-launch expert form is a null
+at one stream (14.21 against 14.14 ms), hangs under overlapped graphs (above) and is off everywhere; their W4A8
+expert kernel is 0.3 ms a step faster at eight rows and 0.3 to 0.75 ms a program slower at two to five, a planner
+choice per shape, and at 8 streams it produced degenerate text (1.003 tokens a step a row, text differs at the first
+character), a defect recorded at the knob; their block-FP8 dense option at one stream is a null on the step (+0.05
+ms a program over 14 small linears; 268.0 prose inside the budget arm's band, 387.0 code against 395 to 398, a class
+move) and at width it did not run: the first attempts died on cuda:0's memory (the whole dense model kept there,
+fixed by the release above and verified at width: 10.0 GB left cuda:0, 79.0 / 77.0 / 77.1 / 76.4 GB a card), then on
+a selection-cache miss for the drafter's head slice at 64 rows (64x5120->32320), then, with a complete cache, on
+their session's thread rule (a dataflow worker's first request of a cached plan still enters the session: "only
+cancel_tuning may run on another thread"); the fix prepares every recorded site on the main thread at the option's
+first call (32a96f3), and the slot then read 697.7 tok/s at 30.10 ms a step against the fold's 798.7 / 807.1 at
+25.46 / 25.68 with identical text. That number is not their kernel's: the option's memory fix (207d3bc) closed their
+preparation session right after session.prepare to free the race's buffers, the prepared state went with it, and
+their require_prepared then materialized every plan with its heuristic default tile (their "was not prepared before
+its first use" line fires inside our path at every plan, and a tile check on pod A gives our path the same tile as
+their default path at every width shape and capacity). So every dense-option number since 207d3bc, the 4.6 ms a step
+at 8 streams and the one-stream arms' +0.05 ms a program, is the default tile; only the morning per-call probes ran
+tuned plans. The fix materializes the state while the session is open (93baa65); the tuned readings at width and at
+one stream follow here. One knob sensitivity worth its own line:
+pod A's first repeat of the fold's 8-stream point ran with FP4_DIRECT_MAX=8 and FP4_DN_KS=1 by mistake and read 32.65
+ms a step against 26.03 with 48 and 2, so the direct expert form's pair limit and the down projection's K split are
+per-shape settings the planner's table must carry, not defaults. The acceptance-length controller under-issues (231.2
+against 263.3) and the islands change nothing at one row (11.35 against 11.34 ms); the budget over the flats wins
+at 8 streams and loses to the rectangle at 16 on prose by 2.1 ms of step for 3.3 percent of tokens. One stop at the
+prime is on record without a cause: the five-row line's first try sat after its load with no step-graph capture, 0
+percent on the cards, every thread waiting and no AOTI package written for 44 minutes, and the same env passed on
+the second try; the candidates are a PDL dependent launch whose primary never resolves or the expert mailbox's host
+poll on a flag nobody raises.
+
+
 **Expert routing by rows, and the five-row timelines (Nov 6).** The expert trace (VXPU_EXPERT_TRACE, 160 tokens, 40
 expert layers, pod C, src86): a layer routes 6 / 30 / 48 pairs at 1 / 5 / 8 rows to 6.0 / 17.6 / 22.0 distinct
 experts; 0 / 6.5 / 10.3 experts hold two or more rows, so 0 / 41 / 54 percent of the pairs could share another
@@ -7356,6 +7415,143 @@ from run 1 at char 296: two texts among three runs under plan b4h, whose budget 
 timings; the same class of numbers under a different pick. That settles the question of the previous entry in
 favour of the policy, not the kernels, for this configuration; the fixed-shape repeat remains the gate for calling
 any form run-to-run stable. Memory while decoding 85.3 / 83.3 / 83.3 / 83.2 GB on each run.
+
+**The first-pair expert form (Nov 6, the (b) kernel, first measurements).** VXPU_FP4_DIRECT_FIRST=1: one working
+program per (distinct held expert, row tile, gate or up x K slice), and per (distinct held expert, row tile, I slice)
+in the down kernel, holding the expert's live rows; the schedule is formed in every program's prologue from the pair
+list (the program of pair q works iff q is the first pair of its expert, its rows are the pairs with the same expert:
+[PP] compares and one [BM, PP] select, no schedule kernel, no table), the bodies are the direct kernels' (one row:
+_fp4_direct_one; rows: _fp4_direct_many with the per-slot form up to FP4_FIRST_MT rows, the gather above), the
+per-pair arrival counters under FP4_PDL=2 as the direct form's. Bit-identical to the direct form on every sample
+measured. VXPU_FP4_FIRST_DOWN=0 keeps the direct down kernel (two pairs a program) under first-pair gate/up kernels.
+Microbench (pod C, CUDA events, 64 expert copies rotated past the L2, 8 rows x 6 pairs): on the EP4 card view of a
+synthetic routing (whole 18.8 MB experts, 12 held pairs over 9.6 distinct) the direct form 163.6 us a layer against
+272.2 for the first form with the gather body (its [16, BK] x tile staged through shared memory halves the resident
+programs); on the TP4 shape (4.7 MB slices, all 48 pairs, 39.6 distinct: less sharing than the trace's 22) direct
+155.2 against 189.6 (gather), 189.4 (per-slot MT 4), 200.9 (MT 8): 18 percent fewer bytes, 22 percent slower, the
+few-row body not the cause; the down kernel's two-pairs-a-program form is what the first form loses on singleton
+experts, hence the direct-down arm. The sweep on the real 8-row routing (22 distinct of 48, 10 experts with 2+ rows)
+decides; it is where the byte saving is 54 percent.
+
+### What the planner takes from hero 15
+
+The planner owns the search. It runs the per-shape measurements itself, with a pass/fail bar per entry, and it
+measures combinations as combinations; single factors are isolated only to attribute a winner. A measurement of our
+own path cannot rule out a technique the competitor ships: the dense option's first width numbers were our
+integration (placement, cache coverage, a session closed too early), not their kernel.
+
+The cost surface is piecewise. Every knob of the day changed sign across row count: the bf16 wire costs the class at
+one row and gains 3 to 7 percent at 8 and 16 streams; their expert kernel is 0.3 ms faster at eight rows and 0.3 to
+0.75 ms a program slower at two to five; the one-launch form is a null at one row and hangs under overlapped graphs;
+FP4_DIRECT_MAX 8 against 48 is 6 ms a step at 8 streams. So the planner costs each site at the row counts the plan's
+programs run, on the critical path as the in-graph stamps measure it (a side branch can halve and move nothing), with
+fused regions costed in place, and it remembers that the L2 makes repeated reads free on a bench and a tile each in
+the step.
+
+Memory per card is a plan input. The planner reads each card's resident bytes after placement and refuses or
+re-places before a width run; cuda:0 holding the whole dense model beside its share cost two width runs.
+
+Classes are opt-in with a measured acceptance cost, and the defaults stay exact. A form whose text is not stable from
+run to run under a fixed policy cannot be a default; a policy that sizes rows from live timings uses a smoothed cost
+model, so its choices do not move with one step's noise.
+
+The record of a run carries the tree hash, the artifact md5 and bytes, the knobs in effect, the checks field, the
+repeat status (identical text or same class), the per-card memory after placement and while decoding, the build time,
+and the per-kernel device stamps. A skipped check is a hard error, not a dash in a table.
+
+Build cost shapes behaviour. Kernel selection lives outside the compiled graph, so a knob is a reload and not a
+45-minute rebuild, and packages build in parallel.
+
+The first strategies with measured pairs: adaptive draft depth under the cost-model budget, the fused bf16 wire, the
+fp8-head drafter recipe, TP4 experts, the per-expert expert kernel (9a3af21, with BK 128), their expert kernel chosen
+per shape, and their dense linears (the tuned numbers pending at the close).
+
+Filed for codebot today: #529 the skeleton (plan in, run, record out), #530 the first substitution from a measured
+table, #531 the evaluation loop command, #532 cost model v0 on the critical path, #533 concurrency and overlap in the
+record, beside #525 and #527.
+**The first-pair form on the real 8-row routing (Nov 6).** The trace from the block-7 artifact (160 tokens, 68
+drafted steps a layer, 2,720 layer-steps): 48 pairs over 23.0 distinct experts a layer, 10.3 experts with two or more
+rows, 52 percent of the pairs sharing an expert, up to 8 rows on one. The microbench on 32 of those layer-steps
+(21.2 distinct on the samples), every arm bit-identical to the direct form: TP4 shape (4.7 MB slices, all 48 pairs,
+floor 69 us) direct 141.3 us a layer; first-pair gate/up kernels over the direct down kernel 126.6 (gather body) and
+129.9 (per-slot body MT 4); the first-pair down kernel as well 132.0 / 134.6. EP4 shape (whole 18.8 MB experts, a
+card's 11.8 held pairs over 4.8 distinct, floor 63 us) direct 143.5; first-pair gate/up over the direct down 126.2;
+the first-pair down kernel as well 187.5 / 183.6. The result: the gate/up kernels in the first-pair form read each
+distinct expert once and save 10 to 12 percent of the expert node in both shapes (about 0.6 ms a step at 40 layers);
+the down kernel keeps the direct form, whose two-pairs-a-program latency chains the first-pair form cannot share
+on singleton experts. The node stays 1.8x its floor: 126.6 us for 100 MB of distinct bytes is 790 GB/s, so the
+first-pair programs do not run at the direct form's per-program speed either; the floor wants the many-row tile at
+the one-row kernel's bandwidth, which this body does not reach. The arm goes to the step entries as
+VXPU_FP4_DIRECT_FIRST=1 VXPU_FP4_FIRST_DOWN=0 VXPU_FP4_FIRST_MT=0 (block-7 code against 465.1 at 14.06 ms, five-row
+prose against 263.3 at 11.37, then the budget arms, each gated against its same-tree control and the tree41
+control); the PDL arms (FP4_PDL 1 and 2, the entries' setting) are measured on the microbench for the record.
+
+**The first-pair arm under PDL, its split, and the tile sweeps (Nov 6).** TP4 shape, real routing, bit-identical in
+every arm. Under FP4_PDL 1: direct 138.7 us a layer, the arm (first-pair gate/up over the direct down kernel) 124.2;
+under FP4_PDL 2: 130.3 against 116.5; the saving is 10.5 percent at every PDL setting and PDL 2 is the best setting
+for both forms (the arm 1.69x the 69 us floor against the direct form's 1.89x). The split from kernel durations
+(compute kernels only) under PDL 2: direct gate/up 86.9 + down 61.7; the arm gate/up 73.9 + down 58.7 (the wall
+116.5, the two overlapping): the whole saving is in the gate/up launch, which reads its 67 MB of distinct bytes at
+907 GB/s against a 46 us floor; the down launch, still per pair over 75 MB (33 MB distinct, floor 23 us), is now the
+larger part above its floor, and its first-pair form loses today because singleton experts lose the two-pairs-a-
+program chain (the fix: pair singleton experts two a program, which needs a rank among the first pairs, a [PP, PP]
+compare in the prologue). The gate/up tile sweeps on the arm: stages 4 / 5 lose on both forms (163.0 / 165.3 against
+116.5; direct 135.6 / 145.2 against 130.3), BN 64 loses (150.6), BN 128 badly (279.6 and 269.2), BN 32 is the default
+(116.5 repeated): the winning tile is narrow and shallow, more and shorter programs rather than more bytes in flight
+per program.
+
+**The first-pair down kernel with paired singletons: a closed negative (Nov 6).** The singleton experts of the
+first-pair down kernel paired two a program as the direct down kernel pairs pairs (VXPU_FP4_FIRST_PAIR2: the rank
+among the singleton first pairs from PP vector passes over the pair list in the prologue, the partner's arrival wait
+and counter zeroing beside the tile's). Without PDL it compiles and is bit-identical, and reads 168.3 us a layer
+against the direct form's 148.6 and the arm's 126.6 on the same 8 samples: the first-pair down body loses on the
+experts with several rows, not on the singletons, because its tile does the SwiGLU, the routing weight and the
+per-32 requantization on a [16, BK] tile every K step where the per-pair kernel does one row, and that costs more
+than the w2 bytes it saves. Under FP4_PDL 2 the kernel does not compile: Triton's layout pass
+(TritonGPURemoveLayoutConversions) fails, and the bisect places it in the partner's wait block (the one-pair body in
+place of the two-pair call fails the same way, the scan removed fails the same way, PDL off compiles). The knob stays
+in the code, off. The first-pair form's defaults now select the measured arm (the direct down kernel, the gather
+body), so VXPU_FP4_DIRECT_FIRST=1 alone is the arm; the gate/up K step 128 (108.0 against 116.5 us) is the one
+further lever that measured, a table knob for the entries.
+
+**The width routing, and the expert kernel at width (Nov 6, pod C).** The 16-stream trace (tree50, the budget plan
+over the flats of 48, 64 and 80 rows, 78 steps at 36.9 ms median) ran every step on the 80-row flat program: 480
+pairs a layer over 99.8 distinct experts (4.8 pairs an expert, 63 experts with two or more rows, 79 percent of the
+pairs could share a tile, up to 69 rows on one). At that width the pair count is above FP4_DIRECT_MAX (48), so the
+direct path and the first-pair form inside it are not taken and the GEMM form runs; on the TP4 slices it reads the
+472 MB of distinct bytes in 292 to 300 us a layer, 1.58 to 1.62 TB/s, the card's HBM floor: the expert kernel at
+width is byte-bound and the per-expert form has nothing to add there; its domain is the one-stream shapes (at most
+48 pairs). The finding at width is the placement: the EP4 shape the prose entries run (a card's quarter of whole
+experts, here 120 held pairs over 26.4 distinct) costs 431 to 439 us a layer for the same bytes, 1.13 to 1.16 TB/s,
+against the TP4 slices' 300: about 135 us a layer, 5.4 ms of the 35 ms 16-stream prose step (measured on the bench,
+inferred to the step) if the prose entries ran the experts as TP4 slices as the code entries do; a class (the K-split
+partials) the code entries already carry, and a plan choice. Both forms bit-identical in every pair.
+
+**The 8-stream prose placement: the slices win with the same text (Nov 6, pod C).** Every 8-stream prose entry
+since tree24 ran the EP4 placement (a card's quarter of whole experts) while the code entries ran TP4 slices, after
+a tree24 pair (31.88 against 33.24 ms a step but 667.5 against 676.3 tok/s: accepted a step 1.96 to 1.89, a class
+effect on the sampled text) and nothing re-measured it after the wire, scatter-sum and padding changes. The direct
+test: W48-8p-bf16f's exact configuration (tree48, bf16 wire, the sb plan, the four per-length verifies and eight flats
+of the b8 export) plus VXPU_EXPERT_TP=4 VXPU_FP4_DN_KS=1, 8 streams prose on the league harness (W48-8p-tp4-C):
+866.6 tok/s at 24.48 ms median (23.76 mean), 1.73 accepted a step a row, text identical to the EP4 entry's (gate
+passed), against 798.7 at 26.03 (25.46) and 1.73: 8.5 percent more throughput from a step 1.7 ms shorter, all of it
+in the expert node, and the entry from 96.6 to 104.8 percent of the published 827. The load built nothing (D's
+tree48 packages copied to C's cache); the record carries EXPERT_TP_env 4. Memory while decoding 94.0 / 86.2 / 86.2 /
+86.3 GB (tree48 has no cuda:0 release). The same-tree EP4 control on C follows. The lesson for the planner: a
+placement choice measured once on an old tree stayed the default for twelve trees; the planner re-measures its
+choices when the step changes.
+
+**The 8-stream prose placement, the same-tree control (Nov 6, pod C).** W48-8p-bf16f-C, the EP4 configuration
+rerun on C: 829.6 tok/s at 26.24 ms median (25.48 mean), 1.83 accepted a step a row, its text departing from D's
+W48-8p-bf16f at char 291 while the step time matches D to 0.02 ms (25.48 against 25.46 mean): the pods agree on the
+step, and the slots policy's picks move the text and the acceptance between runs, as the 16-stream rectangle repeats
+did. On one pod the slices read 866.6 at 23.76 against the quarter's 829.6 at 25.48: 4.5 percent more throughput
+from a step 1.7 ms shorter, the measured part; against D's 798.7 the 8.5 percent includes the policy's draw. The
+depth at 16 streams is capped by the export (a block-5 drafter, step_tokens 5: four drafts a stream, the deepest
+flat 80 = 16 x 5) and the plan's draft 4; the policy "slots" gives every live row its token row and fills the rest
+of the smallest flat program that fits with the drafts of the highest survival across streams, so it issued 3.41 of
+4 at 97 percent conditional acceptance on code: the cap binds, not the policy, and a deeper step needs a block-7
+b16 export with flats at 96 and 112 rows.
 
 **The league table at the close of hero 15 (Nov 6, 10:30 UTC; two readings still running).** Their numbers are the
 vLLM fork measured on our four cards by the vllm-ref pod, the league method (one prompt a case, the decode window).
