@@ -253,3 +253,18 @@ class MxProducerGPUTest(unittest.TestCase):
             pdec = pq.float() * torch.ldexp(torch.ones_like(pe, dtype=torch.float32), pe.int() - 127).repeat_interleave(32, dim=1)
             self.assertTrue(torch.equal(dec, pdec), rows)
             T.mx_memo_clear()
+
+
+class GemmFuseTest(unittest.TestCase):
+    """The GEMM form's fusions (FP4_FUSE_EPI, hero run 15): the knob and the host-side choice, without a GPU."""
+
+    def test_the_knob_is_declared_and_off(self):
+        from vxpu import plan
+        self.assertIs(plan.KNOBS["FP4_FUSE_EPI"], int)
+        self.assertEqual(T.FP4_FUSE_EPI, 0)
+
+    def test_the_lookup_needs_the_expert_ids(self):
+        ids = object()
+        self.assertEqual(T._fp4_fuse(ids, False, 1, 1, 32, bits=0), (False,))
+        self.assertEqual(T._fp4_fuse(ids, False, 1, 1, 32, bits=1), (True,))
+        self.assertEqual(T._fp4_fuse(None, False, 1, 1, 32, bits=1), (False,))

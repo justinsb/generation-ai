@@ -4145,14 +4145,15 @@ if triton is not None:
 
     @triton.jit
     def _grouped_schedule_kernel(slot_ptr, map_ptr, start, scratch_ptr, order_ptr, bslot_ptr, bfirst_ptr, bcount_ptr,
-                                 P, S, NB, BM: tl.constexpr, PP: tl.constexpr, NBP: tl.constexpr,
-                                 LOOKUP: tl.constexpr = False, PDL: tl.constexpr = False):
+                                 pslot_ptr, P, S, NB, BM: tl.constexpr, PP: tl.constexpr, NBP: tl.constexpr,
+                                 LOOKUP: tl.constexpr = False, PDL: tl.constexpr = False, SLOT_OUT: tl.constexpr = False):
         """_grouped_schedule in one program, for up to 8192 pairs: sort the pairs by slot (stable:
         the key carries the pair index), cut each slot's run into blocks of BM, and count each
         block's pairs. LOOKUP: slot_ptr holds the pairs' expert ids and the slots come from the
-        pool's slot map here (the decode step's path: no gather launches ahead of this one). PDL:
-        the dependent grid (the grouped gate/up kernel) may be scheduled at once; it waits for this
-        program's completion before it reads the table."""
+        pool's slot map here (the decode step's path: no gather launches ahead of this one); with
+        SLOT_OUT each pair's slot (-1: not held) also goes to pslot_ptr, for a kernel after this one
+        that reads it per pair. PDL: the dependent grid (the grouped gate/up kernel) may be
+        scheduled at once; it waits for this program's completion before it reads the table."""
         if PDL:
             _gdc_launch_dependents()
         i = tl.arange(0, PP)
@@ -4160,6 +4161,8 @@ if triton is not None:
         if LOOKUP:
             e = tl.load(slot_ptr + i, mask=live, other=0)
             sl = tl.load(map_ptr + e - start, mask=live, other=-1)
+            if SLOT_OUT:
+                tl.store(pslot_ptr + i, sl, mask=live)
         else:
             sl = tl.load(slot_ptr + i, mask=live, other=-1)
         sl = tl.where(sl < 0, S, sl)  # not held here: after every held slot
@@ -4181,14 +4184,16 @@ if triton is not None:
         tl.atomic_add(bcount_ptr + bid, 1, mask=held)
 
 
-def _grouped_schedule(slot, S, BM, lookup=None, pdl=False):
+def _grouped_schedule(slot, S, BM, lookup=None, pdl=False, want_slot=False):
     """Blocks of up to BM pairs sharing a held expert, from each pair's slot (-1: not held here).
     All on the device and of fixed size, so a CUDA graph can capture it: (order of the pairs
     sorted by slot, and per block its slot, first index into the order, and pair count; blocks
     past the last real one have count <= 0). lookup=(slot_map, start): `slot` holds the pairs'
     expert ids and the kernel looks their slots up itself (the decode step: the gather and its
-    cast were two launches a layer ahead of the schedule's one). pdl: the kernel releases its
-    dependents at once (the grouped gate/up kernel launches under PDL and waits for the table)."""
+    cast were two launches a layer ahead of the schedule's one); want_slot adds each pair's slot
+    (int32, -1 where not held) as a sixth value, written by the same kernel. pdl: the kernel
+    releases its dependents at once (the grouped gate/up kernel launches under PDL and waits for
+    the table)."""
     P = slot.numel()
     blocks = triton.cdiv(P, BM) + min(S, P)  # an upper bound: every held slot adds at most one partial block
     if P <= 8192 and S + 1 < 16384:  # one program sorts and cuts: one launch instead of a dozen
@@ -4202,10 +4207,14 @@ def _grouped_schedule(slot, S, BM, lookup=None, pdl=False):
         bfirst = torch.empty(blocks, dtype=torch.int32, device=dev)
         bcount = torch.empty(blocks, dtype=torch.int32, device=dev)
         smap, start = lookup if lookup is not None else (slot, 0)
+        slot_out = want_slot and lookup is not None
+        pslot = torch.empty(P, dtype=torch.int32, device=dev) if slot_out else order
         with torch.cuda.device(dev):
-            _grouped_schedule_kernel[(1,)](slot.contiguous(), smap, start, scratch, order, bslot, bfirst, bcount, P, S,
-                                           blocks, BM=BM, PP=PP, NBP=2 * PP, LOOKUP=lookup is not None, PDL=pdl,
-                                           num_warps=8)
+            _grouped_schedule_kernel[(1,)](slot.contiguous(), smap, start, scratch, order, bslot, bfirst, bcount, pslot,
+                                           P, S, blocks, BM=BM, PP=PP, NBP=2 * PP, LOOKUP=lookup is not None, PDL=pdl,
+                                           SLOT_OUT=slot_out, num_warps=8)
+        if want_slot:
+            return order, bslot, bfirst, bcount, blocks, pslot if slot_out else slot.to(torch.int32)
         return order, bslot, bfirst, bcount, blocks
     if lookup is not None:
         slot = lookup[0][(slot - lookup[1]).long()].to(torch.int32)
@@ -4221,7 +4230,8 @@ def _grouped_schedule(slot, S, BM, lookup=None, pdl=False):
     j = b - (blk_end[s_of_b] - nblocks[s_of_b])  # the block's index within its slot
     first = starts[s_of_b] + j * BM
     count = torch.where(b < blk_end[-1], torch.clamp(counts[s_of_b] - j * BM, max=BM), 0)
-    return order, s_of_b.to(torch.int32), first.to(torch.int32), count.to(torch.int32), blocks
+    out = order, s_of_b.to(torch.int32), first.to(torch.int32), count.to(torch.int32), blocks
+    return out + (slot.to(torch.int32),) if want_slot else out
 
 
 def _block_k(dim, want):
@@ -4331,6 +4341,23 @@ FP4_GG_BM, FP4_GG_BN, FP4_GG_BK, FP4_GG_WARPS, FP4_GG_STAGES = (int(os.environ.g
 FP4_GG_KS = os.environ.get("VXPU_FP4_GG_KS", "1")  # the GEMM form's gate/up K split (_fp4_experts_gemm)
 FP4_GD_KS = os.environ.get("VXPU_FP4_GD_KS", "1")  # and its down kernel's I split
 FP4_GEMM_FOLD = os.environ.get("VXPU_FP4_GEMM_FOLD", "0") == "1"  # the GEMM form's folds (_fp4_experts_gemm): off until measured on the drafted steps (chain C61, Nov 4); 1 turns them on
+# The GEMM form's fusions (hero run 15, Nov 6: at 128 rows the expert node is the two GEMMs at the HBM floor, 393 us a
+# layer, and ten small kernels around them, about 60 us a layer, 2.4 ms a step). A bitmask, a table knob
+# (plan.KNOBS), read at each call; VXPU_FP4_FUSE_EPI=7 is the A/B, 0 (the default) the kernels as measured:
+#   1  the schedule's kernel looks the pairs' slots up itself and writes them per pair (the gather and its two
+#      casts before the schedule, three launches, gone);
+#   2  gate and up in one program, with the SwiGLU, the routing weight and the per-32 quantization as its
+#      epilogue, h written in the down kernel's format (the SwiGLU kernel and g and u's round trip gone; needs
+#      an unsplit K and a row tile of whole 32-blocks);
+#   4  the down kernel's epilogue sums the token's held pairs in k order, fp32, from the last of its pairs'
+#      programs on each row tile (the zeroed reply buffer and the aten reduce after the kernel gone; needs the
+#      expert ids, an unsplit I and a summed reply);
+#   8  the down kernel as a programmatic dependent launch of the gate/up kernel (whole-grid wait), where the card
+#      has it.
+# Each is exact against the unfused path: the same arithmetic in another program. The earlier fold
+# (FP4_GEMM_FOLD) made h inside the down kernel's K loop, once per row tile of w2 (160 times the SwiGLU's work),
+# and lost 1.6 ms a step; these fusions do each piece once.
+FP4_FUSE_EPI = int(os.environ.get("VXPU_FP4_FUSE_EPI", "0"))
 FP4_GROUP_WAIT = os.environ.get("VXPU_FP4_GROUP_WAIT", "0") == "1"  # the grouped form's down kernel waits on per-pair arrival counters under FP4_PDL=2 (hero run 15; off until measured on the drafted steps, chain C63); 0: the whole-grid wait
 FP4_GD_BM, FP4_GD_BN, FP4_GD_BK, FP4_GD_WARPS, FP4_GD_STAGES = (int(os.environ.get(f"VXPU_FP4_GD_{k}", v)) for k, v in
                                                                zip(("BM", "BN", "BK", "WARPS", "STAGES"), (FP4_GD_BM, FP4_GD_BN, FP4_GD_BK, FP4_GD_WARPS, FP4_GD_STAGES)))
@@ -4540,6 +4567,15 @@ def fp4_experts_decode(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limi
     return d.view(n, topk, K) if per_pair else d.view(n, topk, K).sum(1)
 
 
+def _fp4_fuse(indices, per_pair, KS, KS2, bn1, bits=None):
+    """The GEMM form's fusions in effect for a call (FP4_FUSE_EPI's bits, each only where its
+    conditions hold): lookup (bit 1: the schedule's kernel looks the slots up; needs the expert
+    ids). Returns (lookup,)."""
+    bits = int(FP4_FUSE_EPI) if bits is None else int(bits)
+    ids = indices is not None
+    return (bool(bits & 1) and ids,)
+
+
 def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit, per_pair, indices, start, native):
     """fp4_experts_decode's path for many pairs (hero run 15): the grouped schedule (blocks of up to
     BM pairs sharing an expert), then _fp4_gemm_gate_up_kernel (gate and up as separate programs,
@@ -4560,13 +4596,15 @@ def _fp4_experts_gemm(x_in, weights, slots, w1, s1, w3, s3, w2, s2, swiglu_limit
     # cast gone), the down kernel makes h from the gate/up outputs (the SwiGLU kernel gone) and sums the token's
     # replies itself (the combine gone), and runs as a dependent launch on per-block arrivals (FP4_PDL)
     fold = FP4_GEMM_FOLD and indices is not None and KS2 == 1
+    # the fusions (FP4_FUSE_EPI, hero run 15, Nov 6); the fold is the earlier form and takes none of them
+    lookup = _fp4_fuse(indices, per_pair, KS, KS2, bn1)[0] if not fold else True
     mode = _fp4_pdl_mode() if fold else 0
     pdl, wait = mode > 0, mode == 2
-    if fold:
-        idx = indices.contiguous().view(-1)
-        smap = slots.contiguous()
-        order, blk_slot, blk_first, blk_count, blocks = _grouped_schedule(idx, S, bm, lookup=(smap, start))
-        slot = None
+    idx = indices.contiguous().view(-1) if indices is not None else None
+    smap = slots.contiguous() if indices is not None else None
+    if lookup:  # the schedule's kernel looks the slots up (and writes them per pair for the SwiGLU kernel)
+        order, blk_slot, blk_first, blk_count, blocks, slot = _grouped_schedule(idx, S, bm, lookup=(smap, start),
+                                                                                want_slot=True)
     else:
         if indices is not None:
             slot = slots[(indices.reshape(-1) - start).long()].to(torch.int32)
