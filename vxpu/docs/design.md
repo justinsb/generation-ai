@@ -7287,3 +7287,44 @@ and thread), which torch exposes only through torch.distributed's one process pe
 the sum-site form and a solo-mode bypass for the prime, about three hours before a first measurement; a hero 16
 build, not a knob.
 
+
+**The host hop, measured (Nov 6, the motivation for one process per rank).** From the profiler dumps on disk
+(device 0's kernel gaps over the last three steps and the main thread's runtime calls overlapping them; the rank
+threads' launches appear only through the devices' first kernels). 16 streams code, 128 rows, the fixed depth-7
+step (53.1 ms; the verify program's stamped span 44.7 to 45.8, the drafter's program 4.4 to 4.8): device 0 idle
+1.79 ms a step in four gaps of 0.15 to 1 ms: 0.79 after the verify's last device copy (the host's acceptance and the
+next launches: event queries, elapsed-time reads, then the 4.37 ms event wait on the drafter), 0.40 between the
+PtoP copies that carry the drafter's output to the other three ranks (10 PtoP copies a step), 0.28 and 0.29 around
+the pinned DtoH and HtoD round trip of the tokens (4 DtoH, 3 HtoD a step); 1.42 ms more in gaps of 20 to 150 us and
+1.48 in gaps under 20 us (node boundaries inside the graphs); the four rank graphs' first kernels within 15 to 70 us
+of device 0's (one case +509); one cudaGraphLaunch of the 505-node graph read 2.7 ms on the host thread. One
+stream, block-7 code (14.0 ms): idle 0.07 ms a step in two gaps above 60 us (0.09 around the token's pinned DtoH,
+0.12 over seven clone-and-copy sequences of 11 to 22 us each), 0.14 in gaps of 20 to 150 us, 1.13 under 20 us; the
+rank graphs' launches serialized about 35 us apart (d1 +30 to 36, d2 +68 to 76, d3 +96 to 112 us after d0). So the
+hop between the two programs is 1.8 ms a step at 16 streams and 0.07 at one; one process per rank removes the
+serialized acceptance-and-launch, turns the broadcast and the pinned round trips into in-stream collectives and
+parallelizes the launches; the drafter's program itself stays a separate program in either model.
+
+**One process per rank, built (Nov 6 evening, the user's "just yolo-run it").** multiproc.py: with VXPU_MP_WORLD
+and VXPU_MP_RANK the engine is one rank of a four-process world on its own card. parallel.World holds one local
+rank (World.ranks and rank_graphs replace the engine's loops over the world's devices), its eager sums and gathers go
+over NCCL, its barrier is a no-op; the step graph's collective nodes become an NCCL all-reduce of the fp32 partial
+(the GEMV's result at a fused site) rounded once plus the reference epilogue, or an NCCL all-gather for the head;
+the embedding's rows are this rank's shard summed over NCCL; the expert slices are this card's part alone; no Comm,
+inboxes or flags on the peers' cards. The binding is ctypes over the libnccl torch ships (one communicator per
+process from the unique id rank 0 writes to a file), chosen over torch.distributed because the same binding was
+proven under per-rank capture on pod C first: four communicators in one process, each rank's all-reduce captured
+from its own thread and replayed from four threads, sums correct; a 4 MB fp32 all-reduce 0.85 ms a replay including
+the thread start (measured). NCCL connects its channels at a communicator's first collective with a handshake over
+the bootstrap socket (the init log shows the channels made after "communicators initialised"), which would deadlock
+if that first collective were issued inside a capture with the peers elsewhere, so init runs eager warm-up
+collectives (both dtypes, both collectives, five sizes) before any capture. The host loop (draft, accept, launch) runs
+in every process over the same data: the ranks hold the gathered logits after the head, so each process makes the
+same choices without a broadcast, which requires a timing-free policy (fixed; slots by survival); the budget and
+cost-model policies read timings and would let the processes diverge. Two traps found at the first start: the
+loader's and the placement's worker threads begin with card 0 as their current device, so a device of "cuda" put
+every process's dense weights and expert slices on card 0 (2.7 GB a process during the load); the engine now
+resolves "cuda" to cuda:rank under multiproc and the launcher binds every new thread to the rank's card. The first
+run: the 16-stream code entry, fixed depth 7 on the 128-row program (no host choice: the certain lockstep; its
+one-process number 1,370.9 tok/s at 56.27 ms), then the slots arm (sb7, five programs; one-process text identical to
+the fixed arm's), each gated on text against its one-process arm and W50-16c-bf16f. Numbers below when read.
