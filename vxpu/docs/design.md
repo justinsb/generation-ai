@@ -7671,11 +7671,16 @@ F102b runs it without the dense option on F97's stack otherwise, text-gated agai
 F102b then died with the whole of /mnt/ssd full (a stale 47 GB of extraction directories under cache/tmp); after
 the cleanup F102c ran the same export on F97's stack in four processes (Nov 6, 23:34 UTC reading, one run).
 
-**Two anchors of four lose a third of the accepted tokens (F102c, measured).** 1,218.2 tok/s at 54.96 ms median
-step against F97's 1,648.4 at 51.59: accepted 3.53 tokens a step against 5.14 for the block-7 drafter (-31 percent),
-and the drafter's wall is not cheaper for it (5.17 ms a step: experts 1.75 ms over 9 sites, 26 collectives 1.06 ms,
-dense 0.74 ms, island 0.65 ms; the single block-7 pass costs 5.34). The second pass restarts from the first pass's own
-states, so positions 5 to 7 are drafted on a guess of a guess, and the drop in the survival of the last three
-positions is bigger than what the fresh anchor returns at position 5. Booked as a negative for the two-pass form at
-block 4; it says nothing yet about their one-token chain, which still needs the empty-positions fix (F101). F103
-(block 2, four passes) is the last form in the queue tonight.
+**The passes path is broken at the block boundary (F102c, measured, the form unmeasured).** 1,218.2 tok/s at
+54.96 ms median step against F97's 1,648.4 at 51.59, accepted 3.53 tokens a step against 5.14. The conditional
+acceptance by position says why: 0.948, 0.946, 0.942, 0.926 for the first block (the block-7 control reads 0.948,
+0.942, 0.918, 0.916 at the same positions), then 0.047 at position 5, the first token of the second block, and 0.442
+and 0.522 at positions 6 and 7 given 5. A drafted token accepted one time in twenty right after four at 0.93 is not a
+weaker draft, it is the wrong token: the second block's first position is misaligned with the target (an off-by-one
+between the first pass's last state and the second pass's anchor, or in how the loop reads the second block's tokens),
+and the two positions after it, at about half, are a real draft started from a wrong anchor. So the two-pass form is
+not measured tonight, and its 3.53 is what the first block alone delivers (0.948 + 0.946 + 0.942 + 0.926 = 3.76
+without the tail). The drafter's wall for two passes is 5.17 ms a step (experts 1.75 ms over 9 sites, 26 collectives
+1.06 ms, dense 0.74 ms, island 0.65 ms) against 5.34 for one block-7 pass. F103 (block 2, four passes) runs after it
+and should show the same mark at positions 3, 5 and 7; the fix is in the export's chained-pass boundary and goes to
+the backlog with F101's empty-positions error.
