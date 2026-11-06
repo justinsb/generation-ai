@@ -7633,3 +7633,13 @@ node it runs beside); the expert node 476 / 624 us a layer against 481 / 633 ove
 policy's first run (F98) was a failed run, not a number: its per-row history was fed in the per-length path's host
 loop while the flat path's accepted counts arrive through the device ring, so every row kept the seed depth 7
 (issued 7.0, flat128 in 56 of 76 steps); fixed in 9be5a18, each row's move printed with its mean in 499d653.
+
+**The per-request depth (Nov 6, 22:42 UTC).** F98b-16c-deep7-request-fullstack (vLLM's AcceptanceLengthController as
+the plan policy "request": depth min(7, floor(mean accepted + 1.5)) over a row's last 16 steps, down at once, up by one
+a window; on F97's stack with the flats f112 and f128): 1,378.9 tok/s at 49.51 ms (94 steps), issued 5.70 and accepted
+4.55 a step against F97's 7.0 and 5.15, text matching; the programs the 8-row main x35, flat112 x41, flat128 x18; the
+moves on rank 0: 7 -> 6 x11, 6 -> 5 x10, 5 -> 4 x7, 4 -> 5 x4, 7 -> 5 x2, 4 -> 3 x2, one row to depth 2 at a mean of
+1.44. The step saved 2.1 ms and the tokens lost 19 percent: the trim loses 16 percent to fixed 7 at our acceptance
+profile (0.79 at position 7 for every row), and the rule ratchets down because accepted is bounded by the depth. Their
+6.22 drafts a stream a step pays where a few streams carry the seventh draft and most do not; ours is flat across
+rows. Closed for this model and width.
