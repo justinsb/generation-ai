@@ -121,13 +121,23 @@ def _plan(device, K, N, capacity, packed=None):
     key = (device.index, K, N, capacity)
     state = _plans.get(key)
     if state is None:
-        import threading
-        if threading.current_thread() is not threading.main_thread():
-            # their preparation session belongs to the thread that made it; an executor thread must find the plan
-            # ready (prepare_everything on the main thread's first call), so this is an error line, not a call
-            raise RuntimeError(f"b12x dense: the plan {capacity}x{K}->{N} on {device} was first requested from thread "
-                               f"{threading.current_thread().name}; plans are prepared on the main thread at the first "
-                               f"eager call (record the site in sites.txt by loading the artifact once, then reload)")
+        with _prepare_lock:  # the rank threads prepare one plan at a time (their compiler and session are not thread-safe)
+            state = _plans.get(key)
+            if state is None:
+                state = _prepare_plan(device, K, N, capacity, packed)
+    return state
+
+
+_prepare_lock = __import__("threading").RLock()
+
+
+def _prepare_plan(device, K, N, capacity, packed):
+    """Prepare one plan on the calling thread. Since 93baa65 the option's own session (made, used and closed on this
+    thread) materializes the selected configuration, so any thread may prepare; the earlier refusal of executor
+    threads (32a96f3) addressed their lazy global session, which this path no longer enters, and it killed a load
+    whose first request came from a rank thread (A121, Nov 6)."""
+    key = (device.index, K, N, capacity)
+    if True:
         if _capturing(device):
             raise RuntimeError(f"b12x dense: the shape {capacity}x{K}->{N} was not prepared before CUDA graph capture "
                                "(the eager warm-up step must see every fp8 linear shape; the verify programs' rows come "
