@@ -7173,3 +7173,17 @@ of the smallest flat program that fits with the drafts of the highest survival a
 4 at 97 percent conditional acceptance on code: the cap binds, not the policy, and a deeper step needs a block-7
 b16 export with flats at 96 and 112 rows.
 
+**The 16-stream code step on its critical path (Nov 6, pod C).** The stamped main program at 16 x 5 = 80 rows
+(tree50, the W50-16c env: TP4 slices, DN_KS 1, bf16 wire; one stamped step, 40.10 ms wall, the entries' 80-row flat
+reads 41.0): the routed expert node 21.58 ms on the path (54 percent; 472 to 668 us a layer), the 90 sum sites 6.14
+(15 percent; 58 to 61 us a site, the head's gather 0.83 at the end), attention core and out 3.72, the router front
+2.55, the hc front 1.70, the attention projections 1.69 (one of each pair overlapped), dense other 1.54, engram 0.72;
+idle 0.45 ms in all, 1.1 to 1.3 us between nodes: the host is not in this step. The shared-expert island, 14.05 ms
+of kernels (276 to 305 us a layer), is entirely off the path, overlapped with the expert node. The number: the
+expert node runs 540 us a layer in the step where the same routing and kernel (the GEMM form, 480 pairs over 100
+distinct, TP4 slices) read 300 us alone on the bench the same afternoon, at the HBM floor; the 9.6 ms between the
+two, 24 percent of the step, is inferred to be the expert node slowed by the island beside it, which shares the
+card's bandwidth and SMs; the A/B is the same trace with every node on one stream (VXPU_PARALLEL_BRANCHES=0). The
+island's own cost is an item either way: one shared FFN at 80 rows in 276 to 305 us is about 10x its byte floor (35
+MB) and far above its compute, a GEMV-form kernel at width.
+
