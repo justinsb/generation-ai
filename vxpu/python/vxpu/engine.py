@@ -844,6 +844,10 @@ class Engine:
                 if not any(gpu.get(layer) for gpu in gpus):
                     return
                 every = list(range(moe.experts_start_idx, moe.experts_start_idx + moe.n_local_experts))
+                if self.world is not None and self.world.multiproc:  # a process per rank: this card's slice alone
+                    r = self.world.local[0]
+                    moe._vxpu_hot = experts_gpu.Residency(moe, [(devices[r], every)], parts=[(r, tp)])
+                    return
                 by_device = [(dev, every) for dev in devices[:tp]]
                 moe._vxpu_hot = experts_gpu.Residency(moe, by_device, parts=[(r, tp) for r in range(tp)])
                 return
@@ -1132,8 +1136,8 @@ class Engine:
         cuda = str(self.device).startswith("cuda")
         if cuda:
             configure_inductor(self.plan)
-        self._tp_tensors = []  # per rank: its weight slices and state, the dict every program of the rank binds
-        for rank, dev in enumerate(self.world.devices):
+        self._tp_tensors = {}  # per rank: its weight slices and state, the dict every program of the rank binds
+        for rank, dev in self.world.ranks():
             t_rank = time.time()
             tensors = {fqn: self._tp_slice(fqn, t, rank, dev) for fqn, t in self.shared.items()}
             state = {fqn: torch.zeros(shape, dtype=dtype, device=dev) for fqn, (shape, dtype) in self.state_specs.items()}
@@ -1144,7 +1148,7 @@ class Engine:
             if cuda:
                 for tensor in state.values():
                     torch._dynamo.mark_static_address(tensor)
-            self._tp_tensors.append(tensors)
+            self._tp_tensors[rank] = tensors
             self._tp_states.append(state)
             self._tp_graphs.append(graph)
             kinds = collections.Counter(n.kind for n in runner.graph.nodes)
@@ -1249,7 +1253,7 @@ class Engine:
                                      f"{self.binding.get('batch', 1)}, {self.binding.get('max_cache_len')}, slack {main_slack}): "
                                      f"export it with --tp {self.tp} --draft --window-slack {main_slack}")
                 graphs = []
-                for rank, dev in enumerate(self.world.devices):
+                for rank, dev in self.world.ranks():
                     graph, split, _ = self._tp_rank_graph(os.path.join(d, par["decode"][rank]), self._tp_tensors[rank], dev,
                                                           rank, tag=f"flat{flat}")
                     graphs.append(graph)
@@ -1267,7 +1271,7 @@ class Engine:
                                  f"{self.binding.get('batch', 1)}, {self.binding.get('max_cache_len')}, slack {main_slack}): "
                                  f"export it with --tp {self.tp} --draft --window-slack {main_slack}")
             graphs = []
-            for rank, dev in enumerate(self.world.devices):
+            for rank, dev in self.world.ranks():
                 graph, split, _ = self._tp_rank_graph(os.path.join(d, par["decode"][rank]), self._tp_tensors[rank], dev, rank,
                                                       tag=f"verify{rows}")
                 graphs.append(graph)
@@ -1302,15 +1306,16 @@ class Engine:
             sites = max([sum(1 for n in g.runner.graph.nodes if n.kind == "allreduce")
                          for g in programs if isinstance(g, StepGraph)] + [1])
             rows_max = max(list(self._tp_decodes) + [self.step_tokens])
-            ar.setup(self.world.devices, sites, max(B * rows_max, max(self._tp_flat, default=0)) * margs.dim,
-                     dtypes=[torch.bfloat16, torch.float32], hcs=[margs.hc_mult])
+            if not self.world.multiproc:  # a process per rank sums over NCCL: no inboxes on the peers' cards
+                ar.setup(self.world.devices, sites, max(B * rows_max, max(self._tp_flat, default=0)) * margs.dim,
+                         dtypes=[torch.bfloat16, torch.float32], hcs=[margs.hc_mult])
         self.world.solo = True
         try:
             with self.external_scope():
                 primed = [(rows, decode, False) for rows, decode in sorted(self._tp_decodes.items())]
                 primed += [(rows, decode, True) for rows, decode in sorted(self._tp_flat.items())]
                 for rows, decode, flat in primed:
-                    for rank, (graph, dev) in enumerate(zip(decode.graphs, self.world.devices)):
+                    for rank, (graph, dev) in self.world.rank_graphs(decode.graphs):
                         if not isinstance(graph, StepGraph):
                             continue
                         self.world._local.rank = rank
@@ -1335,7 +1340,7 @@ class Engine:
                         finally:
                             self.world._local.rank = None
                 if self._draft_run is not None and hasattr(self._draft_run, "graphs"):  # the sharded drafter: rank by rank
-                    for rank, (graph, dev) in enumerate(zip(self._draft_run.graphs, self.world.devices)):
+                    for rank, (graph, dev) in self.world.rank_graphs(self._draft_run.graphs):
                         if not isinstance(graph, StepGraph):
                             continue
                         self.world._local.rank = rank
@@ -1408,7 +1413,7 @@ class Engine:
             from . import allreduce as _allreduce
             _allreduce.PULL_SCOPE = "draft"  # the drafter's sums may take the pull form alone (DRAFT_ALLREDUCE_PULL)
             try:
-                for rank, dev in enumerate(self.world.devices):
+                for rank, dev in self.world.ranks():
                     graph, split, _ = self._tp_rank_graph(os.path.join(self.artifact_dir, par["draft"][rank]),
                                                           self._tp_tensors[rank], dev, rank, tag="draft")
                     graphs.append(graph)
