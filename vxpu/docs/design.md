@@ -7147,3 +7147,17 @@ against the TP4 slices' 300: about 135 us a layer, 5.4 ms of the 35 ms 16-stream
 inferred to the step) if the prose entries ran the experts as TP4 slices as the code entries do; a class (the K-split
 partials) the code entries already carry, and a plan choice. Both forms bit-identical in every pair.
 
+**The 8-stream prose placement: the slices win with the same text (Nov 6, pod C).** Every 8-stream prose entry
+since tree24 ran the EP4 placement (a card's quarter of whole experts) while the code entries ran TP4 slices, after
+a tree24 pair (31.88 against 33.24 ms a step but 667.5 against 676.3 tok/s: accepted a step 1.96 to 1.89, a class
+effect on the sampled text) and nothing re-measured it after the wire, scatter-sum and padding changes. The direct
+test: W48-8p-bf16f's exact configuration (tree48, bf16 wire, the sb plan, the four per-length verifies and eight flats
+of the b8 export) plus VXPU_EXPERT_TP=4 VXPU_FP4_DN_KS=1, 8 streams prose on the league harness (W48-8p-tp4-C):
+866.6 tok/s at 24.48 ms median (23.76 mean), 1.73 accepted a step a row, text identical to the EP4 entry's (gate
+passed), against 798.7 at 26.03 (25.46) and 1.73: 8.5 percent more throughput from a step 1.7 ms shorter, all of it
+in the expert node, and the entry from 96.6 to 104.8 percent of the published 827. The load built nothing (D's
+tree48 packages copied to C's cache); the record carries EXPERT_TP_env 4. Memory while decoding 94.0 / 86.2 / 86.2 /
+86.3 GB (tree48 has no cuda:0 release). The same-tree EP4 control on C follows. The lesson for the planner: a
+placement choice measured once on an old tree stayed the default for twelve trees; the planner re-measures its
+choices when the step changes.
+
