@@ -239,6 +239,11 @@ class Engine:
             CONFIG_MAPPING)
 
         self.artifact_dir = artifact_dir
+        from . import multiproc
+        if multiproc.active() and str(device).startswith("cuda"):
+            # a process per rank (multiproc.py): this rank's card by index, so that the loader's and the placement's
+            # worker threads, whose current device is card 0, put every tensor of "cuda" on this card
+            device = f"cuda:{multiproc.rank()}"
         self.device = device
         self.compile_decode = compile_decode
         self._copy_worker_hook = _copy_worker_hook or self._copy_worker_hook
@@ -846,7 +851,7 @@ class Engine:
                 every = list(range(moe.experts_start_idx, moe.experts_start_idx + moe.n_local_experts))
                 if self.world is not None and self.world.multiproc:  # a process per rank: this card's slice alone
                     r = self.world.local[0]
-                    moe._vxpu_hot = experts_gpu.Residency(moe, [(devices[r], every)], parts=[(r, tp)])
+                    moe._vxpu_hot = experts_gpu.Residency(moe, [(self.world.devices[0], every)], parts=[(r, tp)])
                     return
                 by_device = [(dev, every) for dev in devices[:tp]]
                 moe._vxpu_hot = experts_gpu.Residency(moe, by_device, parts=[(r, tp) for r in range(tp)])
