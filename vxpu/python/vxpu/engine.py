@@ -2057,13 +2057,18 @@ class Engine:
                         continue
                     h = req_hist[i]
                     if len(h) >= req_w:
-                        target = min(max_draft, max(1, int(sum(h) / len(h) + 1.5)))
+                        mean = sum(h) / len(h)
+                        target = min(max_draft, max(1, int(mean + 1.5)))
+                        before = req_depth[i]
                         if target < req_depth[i]:
                             req_depth[i], req_since[i] = target, 0
                         elif target > req_depth[i]:
                             req_since[i] += 1
                             if req_since[i] >= req_w:
                                 req_depth[i], req_since[i] = req_depth[i] + 1, 0
+                        if req_depth[i] != before:  # the record: each row's move, with the mean behind it
+                            print(f"[vxpu] request depth: row {i} mean accepted {mean:.2f} over {len(h)} steps -> target {target}, "
+                                  f"depth {before} -> {req_depth[i]}", flush=True)
                     depths.append(req_depth[i])
                 return depths
             if budget:
