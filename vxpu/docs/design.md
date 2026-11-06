@@ -7684,3 +7684,32 @@ without the tail). The drafter's wall for two passes is 5.17 ms a step (experts 
 1.06 ms, dense 0.74 ms, island 0.65 ms) against 5.34 for one block-7 pass. F103 (block 2, four passes) runs after it
 and should show the same mark at positions 3, 5 and 7; the fix is in the export's chained-pass boundary and goes to
 the backlog with F101's empty-positions error.
+
+**Block 2 by four passes (F103, measured; the form unmeasured) and what the boundary error is.** 793.3 tok/s at
+55.66 ms, accepted 1.93 of 7, drafter wall 7.25 ms (21 expert sites 2.50 ms, 50 collectives 1.44 ms). Conditional
+acceptance by position: 0.959, 0.937, 0.042, 0.549, 0.333, 0.8, 0.417. The first boundary (position 3) is dead as in
+F102c; the later boundaries (positions 5 and 7, the third and fourth passes' first tokens) read 0.33 and 0.42 against
+0.55 and 0.80 inside their blocks, on about 45 and 12 rows. Reading the chained loop in spec_draft against these
+numbers gives three defects, none an off-by-one in the positions themselves (the positions check out: the block's
+drafts at start + 1 onward, the next block's first token at start + block):
+
+1. The stand-in states poison the ring. Before each later pass the loop runs the stages over the block's drafts
+   but the last, takes their collapsed residual, doubles it in place of the two target layers' hidden states, pushes
+   it through the target-side projection and writes the result into every stage's window ring at those positions.
+   The pass whose block follows such writes is the dead one: F102c's second pass (three stand-ins written) accepts
+   0.047, F103's second pass (one written) 0.042, while F103's third and fourth passes, which by the next defect
+   write nothing, accept 0.33 and 0.42 with holes in their rings. A stale real entry hurts less than a stand-in. The
+   projection was trained on the target's hidden states, not on the drafter's residual, so this is a mismatch of
+   what is fed, not a shifted index; the earlier form (the block run's own states) read a quarter at the boundary.
+2. Passes three and up drop a draft. The previous block is read as ids[-1][:, 1:], but from the second pass on
+   ids[-1] holds the drafts only (already sliced), so the context run sees the block without its first draft and
+   writes the rest one position early. F103 only.
+3. The input position is never written. The first block's input token sits at start, the ring holds the target's
+   states through start - 1, and no pass writes start; every later pass attends a stale entry there.
+
+So "their drafter form" is unmeasured: F101 (one-token chain) refused at the trace, F102c and F103 ran a broken
+boundary. The morning's first item is the second pass's hidden-state hand-off in their form (which hidden state the
+fork feeds the next pass, and whether the drafter is used as trained on its own states), then the two indexing
+fixes, then F104 (block 4, two passes) against F97 with the expectation of about 5.6 accepted of 7 if the second
+block drafts at the first block's rates. F104 not started tonight (the defect was not located by 23:50 UTC); F100
+ran instead.
