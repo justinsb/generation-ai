@@ -7655,10 +7655,30 @@ cost that is not flat. The finding underneath: their per-position list from /met
 position i over drafted at i), ours above is the conditional rate (accepted at i given accepted at i - 1). Ours
 multiplied out at fixed 7 (F93c): 0.948, 0.893, 0.820, 0.751, 0.683, 0.586, 0.463, sum 5.14 tokens of drafts a step;
 theirs at 16 slots code: reaching position 6 in 73 percent of stream-steps against our 59, sum 5.61 at a full 7, and
-5.04 taken after their trim to 6.22 drafts a stream a step. Their drafter is better at depth on code by about 9
+5.04 taken after their trim to 6.22 drafts a stream a step. Their drafter reads better at depth on code by about 9
 percent in tokens a step, and that with their 12 fewer rows a step (about 116 against our 128 at 0.2 ms a row) is
 most of the league gap at 16 streams; their step and ours now cost the same per row (sums 79 us a site in both, the
 expert node at the same bytes).
+
+Corrected at 23:45 UTC from their source. Their drafter is not iterative: the docstring of their DSpark speculator
+(vllm/v1/worker/gpu/spec_decode/dspark/speculator.py) says it "drafts a block of num_speculative_tokens tokens in one
+parallel pass (anchor + N-1 noise), then injects intra-block dependency with a lightweight sequential Markov head",
+one CUDA graph for the backbone and the Markov sampling. That is our drafter's form to the letter (the anchor, the
+noise positions, the sharded Markov head); the Nov 3 reading of "seven sequential passes" was their EAGLE path, not
+DSpark. So the higher survival at depth is not a better drafter. It is the selection: their 16-slot server runs
+adaptive verification (vllm/v1/worker/gpu/spec_decode/adaptive_verification.py, enabled by
+enable_adaptive_verification with adaptive_verification_cost_scale 1.0; the window controller
+AcceptanceLengthController is built only with adaptive_speculative_tokens_window set, which their launcher does not
+set). Each step an acceptance estimator (spec_decode/acceptance_estimator.py, confidences learned from the admitted
+drafts) gives every draft slot a survival by cumulative product per request; every slot in the batch is ranked by
+survival; for each possible budget of draft rows the estimated accepted tokens are the requests plus the top-k
+survivals, the cost is a profiled verify-cost table by token count times cost_scale, and the budget with the best
+tokens per cost wins; the globally best slots are admitted, with an explore step after 32 idle steps. The per-position
+rates "given drafted" are higher partly because only high-survival slots are drafted to depth. That is our slots form
+with the cost model, and the plan constants of f1a3792 are its rank-identical version (the same arithmetic over given
+verify times, so four processes pick one program from the same logits); D94 without the cost model (4.79 of 6.14) was
+half of it. This is the form the planner carries: the survival ranking, the budget by tokens per cost, and the cost
+table measured per program rather than guessed. F101 to F104 below were therefore never parity items.
 
 **Their drafter form, the attempt (Nov 6, 23:11 to 23:19 UTC).** The exporter's seven chained one-token passes
 (--draft-block 1 --draft-passes 7, their form: the stages' own states standing in for the target's between blocks)
@@ -7681,7 +7701,8 @@ between the first pass's last state and the second pass's anchor, or in how the 
 and the two positions after it, at about half, are a real draft started from a wrong anchor. So the two-pass form is
 not measured tonight, and its 3.53 is what the first block alone delivers (0.948 + 0.946 + 0.942 + 0.926 = 3.76
 without the tail). The drafter's wall for two passes is 5.17 ms a step (experts 1.75 ms over 9 sites, 26 collectives
-1.06 ms, dense 0.74 ms, island 0.65 ms) against 5.34 for one block-7 pass. F103 (block 2, four passes) runs after it
+1.06 ms, dense 0.74 ms, island 0.65 ms) against 2.27 to 2.39 ms for the one block-7 pass of F97 (its draft_ms 2.39;
+the 5.34 first written here was F102c's own draft_ms), 2.2 times the cost for the extra block. F103 (block 2, four passes) runs after it
 and should show the same mark at positions 3, 5 and 7; the fix is in the export's chained-pass boundary and goes to
 the backlog with F101's empty-positions error.
 
@@ -7707,9 +7728,23 @@ drafts at start + 1 onward, the next block's first token at start + block):
 3. The input position is never written. The first block's input token sits at start, the ring holds the target's
    states through start - 1, and no pass writes start; every later pass attends a stale entry there.
 
-So "their drafter form" is unmeasured: F101 (one-token chain) refused at the trace, F102c and F103 ran a broken
-boundary. The morning's first item is the second pass's hidden-state hand-off in their form (which hidden state the
-fork feeds the next pass, and whether the drafter is used as trained on its own states), then the two indexing
-fixes, then F104 (block 4, two passes) against F97 with the expectation of about 5.6 accepted of 7 if the second
-block drafts at the first block's rates. F104 not started tonight (the defect was not located by 23:50 UTC); F100
-ran instead.
+So the chained form is unmeasured: F101 (one-token chain) refused at the trace, F102c and F103 ran a broken
+boundary, and F104 (block 4, two passes, repaired) was not started tonight (the defect was not located by 23:50 UTC).
+With the correction above (their DSpark drafter is a single parallel pass, as ours), the chained form is not a parity
+item; its three defects go to the backlog, to be fixed when convenient, and the morning's first item is their
+acceptance estimator and budgeted slot selection with a measured cost table.
+
+**The rows band at 128 rows (F100, Nov 6, 23:38 to 23:41 UTC, measured, one run).** F100-16c-deep7-fixed7-fullstack-
+front: F97's stack with the table's rows band (112 to 144 rows) carrying FRONT_SPLIT_BD 1024 for the front, from a2's
+packages: 1,624.7 tok/s at 51.22 ms median (mean 50.38), text identical to F97, accepted 5.30 a step against 5.15.
+Under F97's 1,648.4 at 51.59. The stamps split it: the main program gained 0.4 ms (42.02 against 42.33 to 42.51; ffn
+front 3.52 against 3.68 ms over 40 layers, hc front 1.91 against 1.95) and the 128-row program lost 0.7 ms (50.09
+against about 49.1 to 49.4; its experts 657 us a layer against 633), so the band changed the 128-row expert tiles for
+the worse while it bought the front its knob. A negative for the band as written; the front knob alone (the knob
+keyed to the program without a band over the expert tiles) is untested. No repeat: not a high over F97's median.
+
+**Slots by survival with the plan constants (F105, started Nov 6, 23:43:56 UTC).** Their mechanism's rank-identical
+form on F97's stack: policy slots, flat shape over the programs of 112 and 128 rows, cost_model with verify_ms
+{flat112: 46.9, flat128: 49.3} and draft_ms 2.4 from the plan (sb7c.json; f1a3792 patched onto a copy of tree97 as
+/mnt/ssd/src-tp-step97c, five hunks clean), one run, text gate against F97. The last start of the night; its reading
+follows.
