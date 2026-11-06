@@ -1940,30 +1940,21 @@ class Engine:
                 issued[i] += 1
                 counts[i] += 1
             spare = T - sum(counts.values())
-            if spare and (slots or fill == "drafts"):
-                if not slots:
-                    cands = sorted(((self._survival(rows_out, i, k, block, scale), -i, i, k)
-                                    for i in live for k in range(got[i], max_draft)), reverse=True)
-                for _, _, i, k in cands[:spare]:
-                    got[i] += 1
-                    counts[i] += 1
-                spare = T - sum(counts.values())
-            for i in sorted(live, key=lambda i: counts[i]):  # padding, a row holding at most S positions
-                while spare and counts[i] < S:
-                    counts[i] += 1
-                    spare -= 1
-            for i in range(R):  # then the rows that are done, one row each
-                if spare and i not in counts:
-                    counts[i] = 1
-                    spare -= 1
-            if spare:
-                continue
-            seq, rank = [], []
-            for i in sorted(counts):
-                seq += [i] * counts[i]
-                rank += list(range(counts[i]))
-            return T, seq, rank, got
-        return None
+        for i in sorted(live, key=lambda i: counts[i]):  # padding, a row holding at most S positions
+            while spare and counts[i] < S:
+                counts[i] += 1
+                spare -= 1
+        for i in range(R):  # then the rows that are done, one row each
+            if spare and i not in counts:
+                counts[i] = 1
+                spare -= 1
+        if spare:
+            return None
+        seq, rank = [], []
+        for i in sorted(counts):
+            seq += [i] * counts[i]
+            rank += list(range(counts[i]))
+        return T, seq, rank, issued
 
     def _tp_spec_half_ready(self, lengths, flat_sizes=()):
         """Whether the half-fixed shape can start: the sharded drafter's rank graphs are captured and its output lives
