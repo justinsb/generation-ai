@@ -7505,3 +7505,13 @@ down GEMM reads 179.9 against 147.4 with the epilogue, more than the 11 us of fi
 down as a PDL dependent) the same wall; the Nov 5 fold 629. Every arm including arm 0 differs from the direct
 kernels by 16 at about 1.6 percent of the elements, the GEMM form's known class. So FP4_FUSE_EPI=3 is exact and worth
 11 us a layer; it runs as the knob entry on the tuned run's packages.
+
+**The swept tiles on the entry (Nov 6, 20:43 UTC).** F93-16c-deep7-fixed7-tuned: the F91 configuration (four
+processes, NCCL's default transport by a hand-off defect, so F91 is its control) with the 16-entry table: 1,430.5
+tok/s at 60.16 ms a step (75 steps, 5.17 accepted), text identical to the one-process arm; against F91's 1,388.5 at
+61.91. The table rebuilt 26 to 30 of the 373 segments a program (the GEMV launches live in a few), 6 minutes in the
+four processes. Stamped per rank: the main program 50.4 ms against 52.8 (the attention projections 2.46 against
+3.26 ms, 31 us a launch from 40; the expert node 500 against 526 us a layer with the island's dual GEMV inside its
+span; the island class 2.4 against 13.2 ms, now 35 us a layer serial; attention core 120 against 128 us), the 128-row
+program 57.2 against 59.5, the sum sites unchanged at 151 us (the default transport). So the tiles are worth 1.75 ms
+a step at 128 rows, the sweep's on-paper 1.4 plus the island; the same table with their NCCL env follows as F93b.
