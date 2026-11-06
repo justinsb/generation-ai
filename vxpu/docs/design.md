@@ -7613,3 +7613,13 @@ stack, four processes, fixed 8 on the 144-row program): 1,461.8 tok/s at 59.11 m
 text identical to F93c; conditional acceptance 0.931, 0.924, 0.949, 0.925, 0.912, 0.857, 0.749, 0.683. The eighth
 position adds 0.68 of a token where the 144-row step costs 7.1 ms more than the 128-row one: block 8 loses ten
 percent to fixed 7, which closes the depth question at 16 streams code; memory 85.8 to 88.2 GB a card.
+
+**The full stack on C's layout (Nov 6, 22:33 UTC).** F97-16c-deep7-fixed7-fullstack: F93c's configuration plus PDL
+on every kernel and their dense option with the autotune selections (d2's tree93-pdl-dense, its packages and its
+dense cache streamed to C; the cache completed by the race in the prime for two shapes C met and d2 had not): 1,648.4
+tok/s at 51.59 ms a step, with repeats 1,654.3 at 51.36 and 1,646.4 at 51.65 (76 steps, 5.15 accepted), text identical
+to F93c and W88: the median of three 1,648.4 at 51.59, 1.1 percent on F93c. The stamps: the main program 42.45 ms
+against 42.81 (experts 481 against 483 us a layer, island 280 against 283, sites 79 in both, attention core 119
+against 120, projections 32 against 31), the 128-row program 49.39 against 49.55: the two pieces are worth about 0.35
+ms a step here, where on d2 they were measured against the default tiles and 147-us sums. The 16-stream code entry in
+four processes stands at 1,648.4 tok/s at 51.59 ms (median of three).
