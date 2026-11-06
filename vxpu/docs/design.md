@@ -7106,3 +7106,17 @@ VXPU_FP4_DIRECT_FIRST=1 VXPU_FP4_FIRST_DOWN=0 VXPU_FP4_FIRST_MT=0 (block-7 code 
 prose against 263.3 at 11.37, then the budget arms, each gated against its same-tree control and the tree41
 control); the PDL arms (FP4_PDL 1 and 2, the entries' setting) are measured on the microbench for the record.
 
+**The first-pair arm under PDL, its split, and the tile sweeps (Nov 6).** TP4 shape, real routing, bit-identical in
+every arm. Under FP4_PDL 1: direct 138.7 us a layer, the arm (first-pair gate/up over the direct down kernel) 124.2;
+under FP4_PDL 2: 130.3 against 116.5; the saving is 10.5 percent at every PDL setting and PDL 2 is the best setting
+for both forms (the arm 1.69x the 69 us floor against the direct form's 1.89x). The split from kernel durations
+(compute kernels only) under PDL 2: direct gate/up 86.9 + down 61.7; the arm gate/up 73.9 + down 58.7 (the wall
+116.5, the two overlapping): the whole saving is in the gate/up launch, which reads its 67 MB of distinct bytes at
+907 GB/s against a 46 us floor; the down launch, still per pair over 75 MB (33 MB distinct, floor 23 us), is now the
+larger part above its floor, and its first-pair form loses today because singleton experts lose the two-pairs-a-
+program chain (the fix: pair singleton experts two a program, which needs a rank among the first pairs, a [PP, PP]
+compare in the prologue). The gate/up tile sweeps on the arm: stages 4 / 5 lose on both forms (163.0 / 165.3 against
+116.5; direct 135.6 / 145.2 against 130.3), BN 64 loses (150.6), BN 128 badly (279.6 and 269.2), BN 32 is the default
+(116.5 repeated): the winning tile is narrow and shallow, more and shorter programs rather than more bytes in flight
+per program.
+
