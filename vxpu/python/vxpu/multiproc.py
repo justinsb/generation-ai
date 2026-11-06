@@ -190,3 +190,14 @@ def allreduce_exact(x):
     if x.dtype == torch.float32:
         return allreduce(x)
     return allreduce(x.float()).to(x.dtype)
+
+
+def allreduce_mixed(x, residual, post, comb):
+    """The mixing sum of a process per rank in two or three kernels: the partial cast to the wire's dtype
+    when it differs, NCCL's all-reduce, then allreduce.mix_total over NCCL's output buffer (the fused
+    epilogue, the one-process sum kernels' mix); VXPU_MP_WIRE=bf16 the bf16 wire class. Returns the new
+    stream [.., HC, d] in residual's dtype."""
+    from . import allreduce as ar
+    wire = torch.bfloat16 if WIRE == "bf16" else torch.float32
+    total = allreduce(x if x.dtype == wire else x.to(wire))
+    return ar.mix_total(total, residual, post, comb)

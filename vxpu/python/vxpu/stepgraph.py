@@ -1036,6 +1036,8 @@ class StepGraph(torch.nn.Module):
             with torch.cuda.stream(stream):
                 if gemv:
                     x = ops.gemv_partial(x, weight, scale, add)
+                if node.kind == "allreduce" and hc is not None and os.environ.get("VXPU_MP_FUSED_MIX", "1") == "1":
+                    return multiproc.allreduce_mixed(x, *hc)  # the fused epilogue (VXPU_MP_FUSED_MIX=0: the aten one)
                 if node.kind == "allreduce":
                     return mixed(multiproc.allreduce_exact(x))
                 return multiproc.allgather(x)
