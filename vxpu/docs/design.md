@@ -7289,10 +7289,12 @@ fixed by the release above and verified at width: 10.0 GB left cuda:0, 79.0 / 77
 a selection-cache miss for the drafter's head slice at 64 rows (64x5120->32320), then, with a complete cache, on
 their session's thread rule (a dataflow worker's first request of a cached plan still enters the session: "only
 cancel_tuning may run on another thread"); the fix prepares every recorded site on the main thread at the option's
-first call (32a96f3), and the slot then read: 697.7 tok/s at 30.10 ms a step against the fold's 798.7 / 807.1 at
-25.46 / 25.68 with identical text, so their dense kernel on the 14 small linears costs 4.6 ms a step at 8 to 40 rows
-where it was a null at one row (verify medians flat28 28.71 ms, flat32 30.71, flat40 33.71 against the fold's step
-of 26.0), a measured negative at width and off the entries at every shape. One knob sensitivity worth its own line:
+first call (32a96f3), and the slot then read 697.7 tok/s at 30.10 ms a step against the fold's 798.7 / 807.1 at
+25.46 / 25.68 with identical text; but that load prepared only the 8-row plans on the main thread (the flat verify
+bindings' batch is the stream count, not their rows) and every 16, 32 and 64-row plan came from their lazy path with
+its default tile (64x64x128, split-K 1, where the cache's tuned 8-row plan of the same shape is 16x64x128 split-K 2),
+so the 4.6 ms a step is the untuned fallback, not their kernel; the run with every recorded capacity prepared on the
+main thread through the cache (1094ceb) is the tuned width number and follows here. One knob sensitivity worth its own line:
 pod A's first repeat of the fold's 8-stream point ran with FP4_DIRECT_MAX=8 and FP4_DN_KS=1 by mistake and read 32.65
 ms a step against 26.03 with 48 and 2, so the direct expert form's pair limit and the down projection's K split are
 per-shape settings the planner's table must carry, not defaults. The acceptance-length controller under-issues (231.2
