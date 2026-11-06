@@ -905,6 +905,17 @@ class StepGraph(torch.nn.Module):
             if TWO_PART_SUM:  # a two-part box holds the routed partial as fp32 and the shared output as bf16: 1.5 x
                 max_elems = -(-max_elems * 3 // 2)
             ar.setup(self.world.devices, len(sums), max_elems, dtypes=sorted(dtypes, key=str), hcs=sorted(hcs))
+        # the embedding's push-form buffers (VXPU_EMBED_ROWS=push, hero run 15): made here, outside any capture, as
+        # the collectives' are; made inside the capture (the first call of _capture_embed_rows) they were a memset
+        # node on the capture stream: cudaErrorStreamCaptureInvalidated at the first step graph capture (Nov 6)
+        if triton_ops.EMBED_ROWS_FORM == "push":
+            for node in graph.nodes:
+                if node.kind == "embed_rows":
+                    out = runner.inboxes.get((node.name, 0, dev))
+                    if out is not None:
+                        self.world.buffers(("embed_out", self._xkey(node.name)), torch.empty_like(out))
+                        self.world.buffers(("embed_flag", self._xkey(node.name)),
+                                           torch.empty(2 * triton_ops.RING_BLOCK, dtype=torch.int32, device=dev))
         self.world.barrier()
         if self._comm_sums:  # from here this graph holds the Comm's buffers: it is never replaced again
             from . import allreduce as ar
