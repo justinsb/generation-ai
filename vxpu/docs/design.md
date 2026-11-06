@@ -7262,6 +7262,32 @@ kernels" shrinks to about 40; the fusable remainder is the ten small kernels (2.
 levers of the 16-stream code step stand: the drafter's program and the host between the programs (7 ms), the sum
 sites (85 us a site, 7.7 to 9.9 ms), the ten small kernels (2.4 ms).
 
+**The ten small kernels, fused (Nov 6, branch h15-expert-fusion, built GPU-free; the measurement is the pod's).**
+FP4_FUSE_EPI, a bitmask knob of the GEMM form (plan.KNOBS; VXPU_FP4_FUSE_EPI=7 the A/B line; default 0, the kernels as
+measured above). Bit 1: the schedule's kernel looks the pairs' slots up from the pool's map itself and writes them per
+pair for the SwiGLU kernel (the elementwise 1.3, the gather 8.1 and the cast 2.8 before the schedule gone: 12.2 us,
+three launches). Bit 2: gate and up in one program with the SwiGLU kernel's arithmetic as the epilogue over the [16,
+32] tile (the two sums rounded to bf16, the clamps, the routing weight, the per-32 quantization along I, h stored
+bf16; g and u never stored): the SwiGLU kernel (3.3 us) and 3.5 MB of L2 round trip gone, the GEMM's grid halved with
+two dots a program. Bit 4: the down kernel's epilogue sums the token's held pairs in k order, fp32, from the program
+whose arrival completes the token on that row tile (one vector of atomics and TOPK masked tile loads a program, not the
+fold's per-row loop through _fp4_down_finish, which now shares this epilogue): the zero fill of d (4.7 us) and the
+aten reduce (6.8 us) gone, a 2.6 MB fill of y in their place. Bit 8: the down kernel as a dependent launch of the
+gate/up kernel (whole-grid wait), the kernels' existing PDL path turned on without the fold. Each bit holds only where
+its conditions do (bit 2 an unsplit K and a 32-multiple row tile, bit 4 the expert ids, an unsplit I and a summed
+reply), and each is the same arithmetic in another program, so the outputs are the unfused path's bit for bit; the one
+open question is the order of torch's reduce over the six pairs against the k-order sum (the direct kernels' and the
+combine kernel's order), which the bench reports against both references. Expected from the table: bits 1, 2 and 4
+remove 27 us a layer of the 60 (seven of the ten launches), 1.2 ms a step at 43 layers, if the GEMMs hold their time
+with the epilogues; the three kernels that remain in the bracket are the island's (the shared expert's two MXFP8
+recodes, 4.3 us, and its dual GEMV's split-K epilogue, 14.4 us, on the side stream: MXFP8_RECODE and the dual GEMV's
+KSPLIT in the table are their knobs, not this form's), and the fused copy after the node (2.2 us) is the consumer's.
+The measurement: `dev/hero/bench_fuse.py` on a pod (the 128-row TP4 shape on synthetic slices, per kernel and as a
+captured graph, every arm's output against arm 0's and the direct kernels'); `dev/hero/fuse-ab.sh` runs it and, with
+an artifact, the real step with the knob off and on through batches.py (tokens identical, step time). The fold of Nov
+5 (FP4_GEMM_FOLD, 1.6 ms lost) made h inside the down kernel's K loop once per row tile of w2; these fusions do each
+piece once, where its operands already are.
+
 **The package key is stable across processes (Nov 6, correction).** The reading that every load rebuilt 17 to 30
 segments a rank program under a moving key was wrong: pod A's second load of the same program set and plan in a
 fresh process read "373 loaded from the cache, 0 built" for every rank program built an hour before, and C's key log
