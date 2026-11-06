@@ -24,6 +24,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 
+import torch
+
 from . import plan, tune
 
 QUANT = "gemv_rows rows=128 n=5120 k=8192 w=fp8 epi=quant native=1"
@@ -166,3 +168,69 @@ class CommandTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JobLaunchTest(unittest.TestCase):
+    """measure._Job launches the templates' kernels with the positional arguments their signatures take
+    (the first pod run of vxpu.tune: every gemv_rows class failed to launch because the kernel had grown
+    two arguments, yq and ye, after the job was written), and a class key's tiles= sets the row tile."""
+
+    @staticmethod
+    def _positionals(kernel):
+        import inspect
+        import re
+        from . import triton_ops
+        src = inspect.getsource(triton_ops)
+        m = re.search(r"def " + kernel + r"\((.*?)\):\n", src, re.S)
+        params = [p.strip() for p in m.group(1).replace("\n", " ").split(",")]
+        return [p.split(":")[0].split("=")[0].strip() for p in params if "constexpr" not in p and p.strip()]
+
+    def _launch(self, key, blocks):
+        """The (grid, positional args, kwargs) the job hands the kernel, on CPU tensors, with the kernels faked."""
+        from . import measure, triton_ops
+
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def __getitem__(self, grid):
+                return lambda *a, **k: self.calls.append((grid, a, k))
+        rec = Recorder()
+        saved = {n: getattr(triton_ops, n, None) for n in ("_gemv_rows_kernel", "_dual_gemv_swiglu_kernel", "_gemv_pe_kernel")}
+        for n in saved:
+            setattr(triton_ops, n, rec)
+        try:
+            job = measure._Job(key, blocks, torch.device("cpu"), 1 << 20)
+            job.launch(0)
+        finally:
+            for n, v in saved.items():
+                setattr(triton_ops, n, v)
+        return rec.calls[0], job
+
+    def test_gemv_rows_tiled_class(self):
+        key = "gemv_rows rows=128 n=5120 k=8192 w=fp8 epi=quant tiles=2"
+        (grid, args, kw), job = self._launch(key, {"BN": 32, "BK": 256, "KSPLIT": 1, "warps": 4, "stages": 3})
+        self.assertEqual(len(args), len(self._positionals("_gemv_rows_kernel")), "every positional the kernel takes")
+        self.assertEqual(job.bm, 64)
+        self.assertEqual(grid, (2, 5120 // 32, 1), "the row-tile axis first")
+        self.assertTrue(kw["MT"])
+        self.assertEqual((kw["BM"], kw["BN"], kw["BK"], kw["EPI_QUANT"]), (64, 32, 256, True))
+        (grid, args, kw), job = self._launch("gemv_rows rows=128 n=5120 k=8192 w=fp8 tiles=4",
+                                             {"BN": 32, "BK": 256, "KSPLIT": 1, "warps": 4, "stages": 3})
+        self.assertEqual((job.bm, grid[0]), (32, 4))
+        (grid, args, kw), job = self._launch("gemv_rows rows=8 n=5120 k=8192 w=fp8 epi=add out=f32",
+                                             {"BN": 16, "BK": 256, "KSPLIT": 1, "warps": 4, "stages": 3})
+        self.assertEqual(grid, (5120 // 16, 1), "one pass: no row-tile axis")
+        self.assertTrue(kw["HAS_ADD"])
+        self.assertEqual(job.y.dtype, torch.float32)
+        with self.assertRaises(ValueError):
+            self._launch("gemv_rows rows=128 n=5120 k=8192 w=fp8 tiles=3", {"BN": 32, "BK": 256, "KSPLIT": 1, "warps": 4, "stages": 3})
+
+    def test_other_templates_take_their_positionals(self):
+        (grid, args, kw), _ = self._launch("dual_gemv_swiglu rows=9 n=2304 k=5120 w=fp8",
+                                           {"BN": 32, "BK": 128, "KSPLIT": 4, "warps": 8, "stages": 3})
+        self.assertEqual(len(args), len(self._positionals("_dual_gemv_swiglu_kernel")))
+        self.assertEqual(grid, (2304 // 32, 4))
+        (grid, args, kw), _ = self._launch("gemv_pe rows=1 n=32768 k=1280 w=fp8 epi=rotary hd=512 rd=64",
+                                           {"BN": 32, "BK": 256, "KSPLIT": 1, "warps": 4, "stages": 3})
+        self.assertEqual(len(args), len(self._positionals("_gemv_pe_kernel")))
