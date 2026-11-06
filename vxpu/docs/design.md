@@ -7289,7 +7289,13 @@ fixed by the release above and verified at width: 10.0 GB left cuda:0, 79.0 / 77
 a selection-cache miss for the drafter's head slice at 64 rows (64x5120->32320), then, with a complete cache, on
 their session's thread rule (a dataflow worker's first request of a cached plan still enters the session: "only
 cancel_tuning may run on another thread"); the fix prepares every recorded site on the main thread at the option's
-first call (32a96f3) and its one slot is the pending reading. The acceptance-length controller under-issues (231.2
+first call (32a96f3), and the slot then read: 697.7 tok/s at 30.10 ms a step against the fold's 798.7 / 807.1 at
+25.46 / 25.68 with identical text, so their dense kernel on the 14 small linears costs 4.6 ms a step at 8 to 40 rows
+where it was a null at one row (verify medians flat28 28.71 ms, flat32 30.71, flat40 33.71 against the fold's step
+of 26.0), a measured negative at width and off the entries at every shape. One knob sensitivity worth its own line:
+pod A's first repeat of the fold's 8-stream point ran with FP4_DIRECT_MAX=8 and FP4_DN_KS=1 by mistake and read 32.65
+ms a step against 26.03 with 48 and 2, so the direct expert form's pair limit and the down projection's K split are
+per-shape settings the planner's table must carry, not defaults. The acceptance-length controller under-issues (231.2
 against 263.3) and the islands change nothing at one row (11.35 against 11.34 ms); the budget over the flats wins
 at 8 streams and loses to the rectangle at 16 on prose by 2.1 ms of step for 3.3 percent of tokens. One stop at the
 prime is on record without a cause: the five-row line's first try sat after its load with no step-graph capture, 0
