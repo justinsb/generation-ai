@@ -7439,3 +7439,44 @@ medium-confidence rows (node spans against kernels). The levers that remain meas
 the programs and the drafter inside the step (3.9 together), the embedding's push form (1.0), the small kernels in the
 expert node (2.4, fusable), the sum sites' form at width (the NCCL path measured slower in four processes, the pull
 form 2x cheaper at 1 to 16 rows), and the attention selection path (tenths).
+
+**The four-process entry with the fused epilogue, and why NCCL's ring is slow here (Nov 6, 20:11 UTC, pod C).**
+F91-16c-deep7-fixed7 (16 streams code, fixed depth 7 on the 128-row program, four processes, NCCL bf16 all-reduce
+plus allreduce.mix_total at every mixing sum, stamps on): 1,388.5 tok/s at 61.91 ms a step (75 steps), text identical
+to the one-process arm, 5.16 accepted a step; against the unfused four-process arm 1,146.5 at 66.53 and the
+one-process push form 1,370.9 at 56.27. Stamped per rank (the four within 0.2 ms at every class): the main program
+52.8 ms with the sum sites 15.1 ms = 152 us a site over 89, experts 21.3 (526 us a layer), island 13.2, attention
+core 5.3; the 128-row program 59.5 with experts 27.2; the drafter's program 3.1 with 13 sites at 16 us. The fused
+epilogue took 4.6 ms a step off the unfused arm; the sites remain 152 us against the push form's 85 (stamped, one
+process) and their NCCL's 70 to 90 in their own step on the same cards. The cause, from the probe's NCCL init log
+(the same libnccl and cards, one communicator per rank): the ring 3 -> 0 -> 1 -> 2 -> 3 has three of its four hops
+"via SHM/direct" (host shared memory: 0 -> 1, 1 -> 2, 3 -> 0) and only the PIX pair 2 -> 3 "via P2P/direct pointer",
+two channels. NCCL's default P2P level does not rate the cross-socket pairs P2P-capable on this node; their
+launcher sets NCCL_P2P_LEVEL=SYS with NCCL_PROTO=LL,LL128,Simple, 16 channels and 2 MiB buffers for this hardware
+(read from their reference pod's config). The arms with that env, and the own push form across the processes over
+CUDA IPC (branch h15-ppr-ipc, VXPU_MP_SUMS=push), follow in the ledger. Memory: the six-program slots arm in four
+processes ran out of memory at the capture (94.93 GiB in use on cards 1 and 2 of 94.97), where one process held the
+same six programs; the per-card samples of the fixed-7 run are below.
+
+**The tiles at the 16-stream shapes (Nov 6, 20:18 UTC, the sweep on card 0).** Every GEMV class the fixed-7 step
+launches (F91's kernel record: 19 classes at 128 and 112 rows), re-launched with its own flags and swept over BN,
+BK, warps, stages and the K split in captured graphs over weights rotated past the L2 (gemv-sweep16.py for
+gemv_rows; h15-tune's tool for dual_gemv_swiglu and gemv_pe, whose gemv_rows launches failed at the row-tiled shapes):
+
+| class (rows 128) | engine's tile | us | best tile | us |
+|---|---|---|---|---|
+| gemv_rows 1280x5120 split (wq_a) | BN 16 BK 256 KSPLIT 4 | 20.7 | BN 64 BK 128 KSPLIT 4 | 12.4 |
+| gemv_rows 512x5120 split (wkv) | BN 16 BK 256 KSPLIT 4 | 11.8 | BN 32 BK 128 KSPLIT 4 warps 8 | 9.7 |
+| gemv_rows 5120x2048 (wo_b) | BN 16 BK 256 | 22.0 | BN 64 BK 128 | 12.2 |
+| gemv_rows 5120x576 | BN 16 BK 64 | 12.5 | BN 64 BK 64 warps 8 | 7.0 |
+| gemv_rows 2048x4096 quant groups 2 (wo_a) | BN 32 BK 256 | 16.2 | unchanged | 16.2 |
+| gemv_rows 25600x6144 (head, 2 a step) | BN 16 BK 256 | 257.9 | BN 64 BK 128 | 136.1 |
+| gemv_rows 5120x15360 (1 a step) | BN 16 BK 256 | 162.5 | BN 64 BK 256 | 72.8 |
+| dual_gemv_swiglu 576x5120 (the island) | BK 32 BN 32 KSPLIT 16 | 29.6 | BK 128 BN 32 KSPLIT 4 warps 8 | 13.8 |
+| gemv_pe 8192x1280 rotary | BK 64 BN 32 | 15.5 | BK 128 | 14.6 |
+
+The 112-row classes (the drafter's) take the same winners within a microsecond. On paper about 1.4 ms a step on
+the critical path over 40 layers and the heads, and 1.3 ms on the island's side stream. The 16-entry table
+(vxpu-kernel-table/1, VXPU_PLAN_TABLE) enters the digest, so the dense segments rebuild once; BK 256 to 128 moves the
+fp32 accumulation order (a class), so the tuned run is gated on text. The dispatcher's defaults above 64 rows were
+the one-row tiles carried through the row-tiled form: BN 16 reads the 64-row x tile N / 16 times a call.
