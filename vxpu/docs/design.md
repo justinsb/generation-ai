@@ -7290,11 +7290,14 @@ a selection-cache miss for the drafter's head slice at 64 rows (64x5120->32320),
 their session's thread rule (a dataflow worker's first request of a cached plan still enters the session: "only
 cancel_tuning may run on another thread"); the fix prepares every recorded site on the main thread at the option's
 first call (32a96f3), and the slot then read 697.7 tok/s at 30.10 ms a step against the fold's 798.7 / 807.1 at
-25.46 / 25.68 with identical text; but that load prepared only the 8-row plans on the main thread (the flat verify
-bindings' batch is the stream count, not their rows) and every 16, 32 and 64-row plan came from their lazy path with
-its default tile (64x64x128, split-K 1, where the cache's tuned 8-row plan of the same shape is 16x64x128 split-K 2),
-so the 4.6 ms a step is the untuned fallback, not their kernel; the run with every recorded capacity prepared on the
-main thread through the cache (1094ceb) is the tuned width number and follows here. One knob sensitivity worth its own line:
+25.46 / 25.68 with identical text. That number is not their kernel's: the option's memory fix (207d3bc) closed their
+preparation session right after session.prepare to free the race's buffers, the prepared state went with it, and
+their require_prepared then materialized every plan with its heuristic default tile (their "was not prepared before
+its first use" line fires inside our path at every plan, and a tile check on pod A gives our path the same tile as
+their default path at every width shape and capacity). So every dense-option number since 207d3bc, the 4.6 ms a step
+at 8 streams and the one-stream arms' +0.05 ms a program, is the default tile; only the morning per-call probes ran
+tuned plans. The fix materializes the state while the session is open (93baa65); the tuned readings at width and at
+one stream follow here. One knob sensitivity worth its own line:
 pod A's first repeat of the fold's 8-stream point ran with FP4_DIRECT_MAX=8 and FP4_DN_KS=1 by mistake and read 32.65
 ms a step against 26.03 with 48 and 2, so the direct expert form's pair limit and the down projection's K split are
 per-shape settings the planner's table must carry, not defaults. The acceptance-length controller under-issues (231.2
