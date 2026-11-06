@@ -7606,3 +7606,10 @@ wave's 16 prompts route apart and the node reads its 564 MB at 506 us a layer, 7
 step pays the same bytes (527 us a layer in their expert kernels), so the expert node is not where the steps differ.
 The one-process step under the profiler reads 61.8 against 56.2 before it (2.1 million events for the push form's
 small kernels against 0.55 million for NCCL's); the four-process 53.6 against 53.2.
+
+**Block 8 on d2 (Nov 6, 22:21 UTC, the pod A agent's run of the recipe).** The exporter and the sharded Markov
+tables took draft block 8 (spec3t9-tp4-b16 and the 144-row flat, 95 and 130 s); F96-16c-deep8-fixed8-stack (the
+stack, four processes, fixed 8 on the 144-row program): 1,461.8 tok/s at 59.11 ms a step, 8 issued and 5.39 accepted,
+text identical to F93c; conditional acceptance 0.931, 0.924, 0.949, 0.925, 0.912, 0.857, 0.749, 0.683. The eighth
+position adds 0.68 of a token where the 144-row step costs 7.1 ms more than the 128-row one: block 8 loses ten
+percent to fixed 7, which closes the depth question at 16 streams code; memory 85.8 to 88.2 GB a card.
