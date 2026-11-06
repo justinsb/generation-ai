@@ -7072,3 +7072,20 @@ timings; the same class of numbers under a different pick. That settles the ques
 favour of the policy, not the kernels, for this configuration; the fixed-shape repeat remains the gate for calling
 any form run-to-run stable. Memory while decoding 85.3 / 83.3 / 83.3 / 83.2 GB on each run.
 
+**The first-pair expert form (Nov 6, the (b) kernel, first measurements).** VXPU_FP4_DIRECT_FIRST=1: one working
+program per (distinct held expert, row tile, gate or up x K slice), and per (distinct held expert, row tile, I slice)
+in the down kernel, holding the expert's live rows; the schedule is formed in every program's prologue from the pair
+list (the program of pair q works iff q is the first pair of its expert, its rows are the pairs with the same expert:
+[PP] compares and one [BM, PP] select, no schedule kernel, no table), the bodies are the direct kernels' (one row:
+_fp4_direct_one; rows: _fp4_direct_many with the per-slot form up to FP4_FIRST_MT rows, the gather above), the
+per-pair arrival counters under FP4_PDL=2 as the direct form's. Bit-identical to the direct form on every sample
+measured. VXPU_FP4_FIRST_DOWN=0 keeps the direct down kernel (two pairs a program) under first-pair gate/up kernels.
+Microbench (pod C, CUDA events, 64 expert copies rotated past the L2, 8 rows x 6 pairs): on the EP4 card view of a
+synthetic routing (whole 18.8 MB experts, 12 held pairs over 9.6 distinct) the direct form 163.6 us a layer against
+272.2 for the first form with the gather body (its [16, BK] x tile staged through shared memory halves the resident
+programs); on the TP4 shape (4.7 MB slices, all 48 pairs, 39.6 distinct: less sharing than the trace's 22) direct
+155.2 against 189.6 (gather), 189.4 (per-slot MT 4), 200.9 (MT 8): 18 percent fewer bytes, 22 percent slower, the
+few-row body not the cause; the down kernel's two-pairs-a-program form is what the first form loses on singleton
+experts, hence the direct-down arm. The sweep on the real 8-row routing (22 distinct of 48, 10 experts with 2+ rows)
+decides; it is where the byte saving is 54 percent.
+
