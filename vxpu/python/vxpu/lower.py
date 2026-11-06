@@ -328,7 +328,8 @@ _keyed_cache_dir = None
 def _outside_segments(knob):
     """Whether a knob is read only by the routed experts' kernels or the collectives, which run outside
     the dense segments' packages (the step graph launches them itself)."""
-    families = ("FP4_DIRECT", "FP4_GU_", "FP4_DN_", "FP4_ONE_", "FP4_PDL", "FP4_GEMM_", "FP4_GG_", "FP4_GD_", "ALLREDUCE_")
+    families = ("FP4_DIRECT", "FP4_GU_", "FP4_DN_", "FP4_ONE_", "FP4_PDL", "FP4_GEMM_", "FP4_GG_", "FP4_GD_", "FP4_FUSE_",
+                "ALLREDUCE_")
     return knob.startswith(families) or knob in ("GEMV_PUSH_BN", "DRAFT_ALLREDUCE_PULL")
 
 

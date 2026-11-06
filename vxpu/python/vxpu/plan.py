@@ -367,6 +367,10 @@ KNOBS = {
     "FP4_GEMM_MIN_PAIRS": int,
     "FP4_GG_BM": int, "FP4_GG_BN": int, "FP4_GG_BK": int, "FP4_GG_WARPS": int, "FP4_GG_STAGES": int,
     "FP4_GD_BM": int, "FP4_GD_BN": int, "FP4_GD_BK": int, "FP4_GD_WARPS": int, "FP4_GD_STAGES": int,
+    # the GEMM form's fusions (hero run 15, Nov 6), a bitmask: 1 the schedule's kernel looks the slots up, 2 the SwiGLU
+    # and quantization as the gate/up kernel's epilogue, 4 the token sum as the down kernel's epilogue, 8 the down
+    # kernel as a dependent launch; 0 the kernels as measured at 128 rows (triton_ops.FP4_FUSE_EPI)
+    "FP4_FUSE_EPI": int,
     # vxpu::allreduce (hero run 14): the reduce-scatter form forced, the rows it starts at, the elements a program moves
     "ALLREDUCE_SCATTER": bool, "ALLREDUCE_SCATTER_MIN_ROWS": int, "ALLREDUCE_PUSH_BF16": bool, "ALLREDUCE_PULL": bool, "DRAFT_ALLREDUCE_PULL": bool, "ALLREDUCE_BLOCK": int,
     "TP_PARTIALS_BF16": bool,  # the tensor-parallel partials rounded to bf16 before the ranks' sum (hero run 15): the earlier form, a class

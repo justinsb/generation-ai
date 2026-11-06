@@ -309,7 +309,7 @@ def _expert_form_line(x_, i_, per_pair, dev):
     if b12x:
         form = "b12x (their W4A8 kernel)"
     elif not direct:
-        form = "gemm or grouped-many (above FP4_DIRECT_MAX)"
+        form = f"gemm or grouped-many (above FP4_DIRECT_MAX; FP4_FUSE_EPI {tk.FP4_FUSE_EPI})"
     elif one_launch:
         form = "one-launch"
     elif group:
