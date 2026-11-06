@@ -32,9 +32,35 @@ def _fake_reduce(t):
     return pickle.dumps(("fake", t.clone()))
 
 
-def _fake_rebuild(payload):
+def _fake_rebuild(payload, device):
     kind, t = pickle.loads(payload)
     return t
+
+
+class RetargetTest(unittest.TestCase):
+    def test_the_handle_opens_under_this_card(self):
+        # rebuild_cuda_tensor's arguments as torch's reducer makes them for a tensor on card 2
+        args = (torch.Tensor, (1024,), (1,), 0, torch.UntypedStorage, torch.uint8, 2, b"handle", 1024, 0, False,
+                b"ref", 0, b"event", False)
+        mine = ipc.retarget(args, torch.device("cuda", 0))
+        self.assertEqual(mine[ipc.STORAGE_DEVICE], 0, "opened under this card's context, not the owner's")
+        self.assertEqual(mine[:ipc.STORAGE_DEVICE] + mine[ipc.STORAGE_DEVICE + 1:], args[:6] + args[7:], "nothing else moves")
+        self.assertEqual(ipc.retarget(args, 3)[ipc.STORAGE_DEVICE], 3)
+        self.assertIs(ipc.retarget(args, None), args)
+
+    def test_the_exchange_hands_its_device_to_rebuild(self):
+        seen = []
+
+        def rebuild(payload, device):
+            seen.append(device)
+            return _fake_rebuild(payload, device)
+        with tempfile.TemporaryDirectory() as d:
+            a = ipc.Exchange(d, 0, 2, "t", reduce=_fake_reduce, rebuild=rebuild, device=torch.device("cuda", 0))
+            b = ipc.Exchange(d, 1, 2, "t", reduce=_fake_reduce, rebuild=rebuild, device=torch.device("cuda", 1))
+            b.publish("x", _fake_reduce(torch.ones(2)))
+            got = a.share("x", torch.zeros(2))
+            self.assertEqual(seen, [torch.device("cuda", 0)])
+            self.assertTrue(got[1].is_contiguous() and got[1].storage_offset() == 0)
 
 
 class ExchangeTest(unittest.TestCase):
@@ -134,8 +160,11 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(int(b.flags[key][(0, 1)]), 1)
         a.counters[key][(0, 1)].fill_(5)
         self.assertEqual(int(b.counters[key][(0, 1)]), 5)
-        b.reset_rings()  # rank 1 zeroes its own card's words only: on the CPU every word is "its own"; the filter is by device
-        self.assertEqual(int(b.flags[key][(0, 1)]), 0)
+        b.flags[key][(1, 0)].fill_(1)
+        b.reset_rings()  # rank 1 zeroes its own card's words: the flags raised on it and its own counters
+        self.assertEqual(int(b.flags[key][(0, 1)]), 0, "a flag on card 1")
+        self.assertEqual(int(b.flags[key][(1, 0)]), 1, "a flag on card 0 is rank 0's to reset")
+        self.assertEqual(int(b.counters[key][(0, 1)]), 5, "rank 0's counter stays")
 
 
 class SharedCommTest(unittest.TestCase):

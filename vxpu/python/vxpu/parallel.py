@@ -88,10 +88,11 @@ class World:
     def reset_rings(self):
         """Every ring write's flag and counter back to zero (after steps nobody consumed: the prime); a
         process per rank zeroes its own card's words (the peers' are theirs to reset)."""
-        for d in (self.flags, self.counters):
+        me = self.local[0] if self.multiproc else None
+        for d, own in ((self.flags, 1), (self.counters, 0)):  # a flag lives on its destination, a counter on its source
             for pairs in d.values():
-                for t in pairs.values():
-                    if t is not None and t.device in self.devices:
+                for pair, t in pairs.items():
+                    if t is not None and (me is None or pair[own] == me):
                         t.zero_()
         for dev in self.devices:
             if dev.type == "cuda":

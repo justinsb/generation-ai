@@ -41,15 +41,37 @@ import time
 TIMEOUT = float(os.environ.get("VXPU_IPC_TIMEOUT", "7200"))  # a peer's load may be long (its packages build)
 
 
+STORAGE_DEVICE = 6  # the position of storage_device in rebuild_cuda_tensor's arguments (torch.multiprocessing.reductions)
+
+
 def _default_reduce(tensor):
     from torch.multiprocessing.reductions import reduce_tensor
     fn, args = reduce_tensor(tensor)
     return pickle.dumps((fn, args))
 
 
-def _default_rebuild(payload):
+def retarget(args, device):
+    """rebuild_cuda_tensor's arguments with the storage's device set to `device`, this process's card.
+    torch opens an IPC handle under the storage device's context, the exporter's card k; a mapping
+    made in k's context is unknown to this card's context, and Triton's launcher, which checks a
+    pointer against the current context, refused it ("cannot be accessed from Triton (cpu tensor?)",
+    the first pod run). Opened under this card's context the handle is a pointer our kernels may take,
+    and the open enables peer access to k on the way (cudaIpcMemLazyEnablePeerAccess), as the custom
+    all-reduces of other stacks open every peer's handle from their own card."""
+    if device is None:
+        return args
+    import torch
+    args = list(args)
+    args[STORAGE_DEVICE] = torch.device(device).index if isinstance(device, torch.device) else int(device)
+    return tuple(args)
+
+
+def _default_rebuild(payload, device):
     fn, args = pickle.loads(payload)
-    return fn(*args)
+    t = fn(*retarget(args, device))
+    if not t.is_contiguous() or t.storage_offset():
+        raise RuntimeError(f"ipc: an opened buffer is not a plain contiguous view ({tuple(t.shape)}, offset {t.storage_offset()})")
+    return t
 
 
 class Exchange:
@@ -57,10 +79,11 @@ class Exchange:
     name and gathers every rank's. `reduce`/`rebuild` turn a tensor into bytes and back (torch's
     CUDA IPC reducer; a test's fake)."""
 
-    def __init__(self, directory, rank, size, tag, reduce=None, rebuild=None):
+    def __init__(self, directory, rank, size, tag, reduce=None, rebuild=None, device=None):
         self.directory, self.rank, self.size, self.tag = directory, int(rank), int(size), str(tag)
+        self.device = device  # this process's card: every peer's handle is opened under its context (retarget)
         self.reduce = reduce or _default_reduce
-        self.rebuild = rebuild or _default_rebuild
+        self.rebuild = rebuild or _default_rebuild  # rebuild(payload, device)
         self.opened = []  # what rebuild() returned, kept alive for the process's life (close() drops them)
         os.makedirs(directory, exist_ok=True)
 
@@ -101,7 +124,7 @@ class Exchange:
             if r == self.rank:
                 out.append(tensor)
             else:
-                t = self.rebuild(payload)
+                t = self.rebuild(payload, self.device)
                 self.opened.append(t)
                 out.append(t)
         return out
@@ -139,8 +162,25 @@ def exchange():
                 raise TimeoutError(f"ipc: no unique id file at {uid}")
             time.sleep(0.05)
         tag = str(os.stat(uid).st_mtime_ns)
-        _EXCHANGE = Exchange(os.path.dirname(os.path.abspath(uid)), multiproc.rank(), multiproc.world_size(), tag)
+        _EXCHANGE = Exchange(os.path.dirname(os.path.abspath(uid)), multiproc.rank(), multiproc.world_size(), tag,
+                             device=multiproc.device())
+        import atexit
+        atexit.register(_release)
     return _EXCHANGE
+
+
+def _release():
+    """At exit: this process drops the peers' buffers, then waits for the peers to have dropped its own,
+    so no owner frees under a consumer ("Producer process has been terminated before all shared CUDA
+    tensors released", the first pod run); a peer that died is waited for only briefly."""
+    ex = _EXCHANGE
+    if ex is None:
+        return
+    ex.close()
+    try:
+        ex.barrier("released", timeout=30.0)
+    except TimeoutError:
+        pass
 
 
 def share(name, tensor):
