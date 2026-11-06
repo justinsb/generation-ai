@@ -89,9 +89,19 @@ def configure_inductor(plan):
     The mode itself is a choice of the engine's plan (plan.Plan:
     compile_mode, which VXPU_COMPILE_MODE overrides).
     """
+    import torch._inductor.config as inductor_config
     if plan["prologue_fusion"]:
-        import torch._inductor.config as inductor_config
         inductor_config.prologue_fusion = True
+    from . import triton_ops
+    if triton_ops._pdl_all_on():
+        # chaining parity (PDL_ALL): inductor generates its Triton kernels with gdc_wait before their loads and
+        # gdc_launch_dependents after, and launches them with the dependent-launch attribute (torch 2.14's
+        # config.triton.enable_pdl); the knob is in the kernel digest, so the packages rebuild for it
+        if not hasattr(getattr(inductor_config, "triton", None), "enable_pdl"):
+            from .plan import ConfigError
+            raise ConfigError(f"VXPU_PDL_ALL=1: this torch ({torch.__version__}) has no config.triton.enable_pdl; "
+                              "torch 2.14 or later generates dependent launches")
+        inductor_config.triton.enable_pdl = True
 
 
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json",

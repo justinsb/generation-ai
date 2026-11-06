@@ -355,6 +355,7 @@ KNOBS = {
     "FOLD_POST": bool, "FOLD_POST_RB": int,  # window_kv's row finish in its GEMV's last program (hero run 11), rows at a time
     "FP4_ONE_LAUNCH": bool, "FP4_ONE_PER_SM": int,  # the direct expert path as one launch a layer (hero run 12), programs an SM
     "FP4_ONE_WARPS": int, "FP4_ONE_STAGES": int, "FP4_PDL": int,  # its warps and stages; the two-launch path's down kernel as a programmatic dependent launch (0 off, 1 whole-grid wait, 2 per-pair counters)
+    "PDL_ALL": bool,  # every kernel of the compiled step a programmatic dependent launch (hero run 16): inductor's kernels through config.triton.enable_pdl, ours where they carry a wait
     # the direct kernels under expert parallelism (hero run 15): the compact grid, the held pairs' programs first in
     # dispatch order and the unheld pairs' empty programs last
     "FP4_DIRECT_COMPACT": bool, "FP4_DIRECT_GROUP": bool, "FP4_DIRECT_FIRST": bool, "SHARED_FFN_GEMM_MIN_ROWS": int,
