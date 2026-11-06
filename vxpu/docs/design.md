@@ -7394,3 +7394,48 @@ by construction; (4) our attn_core's fused epilogue (the rotate-back and the fp8
 to aten launches. A gated number about 22:30 at best for a number that cannot reach the bar: recommended no-go for
 the night; the zero-rebuild piece for hero 16 is their decode kernel on random data at our shapes in a standalone
 bench (its time per call at 128 queries, its agreement with our Triton sparse_attn), about 45 minutes.
+
+**Their attention kernel in our step: withdrawn on the kernel table (Nov 6, 19:35 UTC).** The 5.1 ms "attention core
+and out" was a node class (the sparse attention kernel, its combine, the index gathers and top-k, the writes); their
+3.7 was their attention kernels alone. Kernel to kernel, from our profile dump's last three decode steps at 128 rows
+(device 0, the fixed depth-7 step) and their rank-0 breakdown at 16 slots (117 rows), per step:
+
+| kernel | theirs | ours |
+|---|---|---|
+| the attention kernel | unified MLA decode 1.71 ms (38 x 45 us) | sparse attention 2.19 (43 x 55.5 us median) |
+| the combine | merge 0.32 (43 x 7.4) + rotary 0.22 (105 x 2.1) | combine 0.87 (43 x 22.2; the sink, the rope inverse and the fp8 grid inside) |
+| the selection | indexer score 0.41 (16 x 25.7) + sort 0.25 (18 x 13.8) | top-k and sort 0.28 (26 aten launches) + index gathers 0.34 (44 x 7.8) + indexer softmax 0.04 |
+| total | 2.91 | 3.72 |
+
+Their attention kernels are 0.8 ms a step faster than ours at this width, under the millisecond that would have paid
+for the swap; the option's code stays on the branch as far as it got (b12x_attention.py: the plan per shape, the two
+caches concatenated into one paged buffer, the selection mapped to physical slots, the epilogue as the reference's;
+the implementations registered behind VXPU_ATTENTION_KERNEL=b12x; the first call reached their binding and stopped at
+its keyword names, not run further). What would remain to compare is the selection path (our aten top-k, sort and
+gathers against their indexer and sort) and the KV-write kernels, each a few tenths of a millisecond. Found in the
+same dump: the embedding's rows at 128 rows cost 1.03 ms a step in two launches of the pull form's peer read (514 us
+each, _peer_rows_wide_kernel reading the other ranks' shards over PCIe while their steps run); the push form exists
+behind VXPU_EMBED_ROWS=push (the default is pull) and was built for that stall; not run tonight.
+
+**The 16-stream code step, aligned by function (Nov 6; the close of the width story).** Their 16-slot step on this
+node (rank 0, median of 35 decode steps, wall 44.4 ms) against our one-process step at 128 rows (the harness's step
+52.4 ms: the stamped verify span 44.7 to 45.8, the drafter's program and the host between them). Each row names
+both sides' buckets; the confidence says whether the two buckets hold the same work.
+
+| function | theirs (bucket) | ours (bucket) | difference | confidence |
+|---|---|---|---|---|
+| routed experts | 22.2: W4A8 phase 1 14.3 + phase 2 6.8 + silu 0.7 + the 3 drafter launches 0.3 | 19.6: the expert node's span (the two GEMMs 15.7, ten small kernels 2.4, the sum's push inside) | ours ahead 2.6 | high: kernels on both sides |
+| sums | 8.7: 90 NCCL bf16 ring 6.4 + 2 all-gathers 2.3 | 9.0 to 9.9: 90 push sites at 85 us + the head's gather 0.83 | theirs ahead 0.3 to 1.2 | high |
+| attention kernels | 2.9: decode 1.71, merge 0.32, rotary 0.22, indexer 0.41, sort 0.25 | 3.7: sparse 2.19, combine 0.87, top-k and sort 0.28, gathers 0.34, indexer softmax 0.04 | theirs ahead 0.8 | high: kernels on both sides |
+| dense fronts and projections | 10.3: GEMM and quant 9.4 + norm 0.35 + other 0.5 | 11.5: router front 3.7, hc front 2.2, attention projections 3.2, dense other 1.5, engram 0.9 (node spans) | theirs ahead about 1.2 | medium: ours are node spans with their in-node gaps, theirs kernels |
+| embedding rows | inside their dense bucket (not separable) | 1.03: two pull-form peer reads at 514 us | theirs ahead about 1.0 | medium: ours measured, theirs not separated |
+| drafter | 3.7: two replays inside the step | 4.8: a separate program at 112 rows (4.4 to 4.8) | theirs ahead 1.1 | high |
+| host and gaps | 0.47 idle; the 5.7 ms eager span between replays overlapped by the drafter | 1.8 host between the programs + 1.5 in-graph gaps of 20 to 150 us | theirs ahead 2.8 | high: both from timelines |
+| step | 44.4 | 52.4 | 8.0 | high |
+
+Accounted: theirs ahead by 7.2 to 8.1 over the sums, the attention kernels, the dense fronts, the embedding, the
+drafter and the gaps, ours ahead by 2.6 on the experts: a net 4.6 to 5.5 of the 8.0 measured, the rest in the
+medium-confidence rows (node spans against kernels). The levers that remain measured and unspent: the host between
+the programs and the drafter inside the step (3.9 together), the embedding's push form (1.0), the small kernels in the
+expert node (2.4, fusable), the sum sites' form at width (the NCCL path measured slower in four processes, the pull
+form 2x cheaper at 1 to 16 rows), and the attention selection path (tenths).

@@ -2084,6 +2084,18 @@ def _attn_select_context(q, kv_window, kv_compress, attn_sink, compress_idxs, so
         "queries": b * m, "heads": h, "d": d, "t": t, "prefill": prefill}
 
 
+@implementation("vxpu::attn_select", "gpu-b12x", ("cuda",), "rounding",
+                "their sparse-MLA decode kernel (b12x attention.sparse_mla) over the two caches concatenated into one "
+                "paged buffer each call, our index kernels and caches unchanged, the epilogue as the reference's "
+                "(VXPU_ATTENTION_KERNEL=b12x, hero run 15)",
+                applies=lambda plan, prefill=False, **_: __import__("vxpu.b12x_attention", fromlist=["x"]).on() and not prefill)
+def _attn_select_b12x(q, kv_window, kv_compress, attn_sink, compress_idxs, softmax_scale, freqs_table, start, seqlen,
+                      rope_dim, window, prefill):
+    from . import b12x_attention as ba
+    return ba.attn_select(q, kv_window, kv_compress, attn_sink, compress_idxs, softmax_scale, freqs_table, start, seqlen,
+                          rope_dim, window)
+
+
 @implementation("vxpu::attn_select", "gpu-triton", ("cuda",), "rounding",
                 "attn_core's two kernels reading the window ring and the compressed cache, the window's selection "
                 "formed in the first from the rows' positions (a decode step's form)",
@@ -2138,6 +2150,17 @@ def _attn_select_rows_context(q, kv_window, kv_compress, attn_sink, compress_idx
     t = kv_window.shape[1] + compress_idxs.shape[-1]
     return q.device.type, f"queries={b * m} heads={h} d={d} t={t}", {
         "queries": b * m, "heads": h, "d": d, "t": t, "prefill": False}
+
+
+@implementation("vxpu::attn_select_rows", "gpu-b12x", ("cuda",), "rounding",
+                "their sparse-MLA decode kernel in the flat token-row form (b12x_attention.attn_select_rows; "
+                "VXPU_ATTENTION_KERNEL=b12x, hero run 15)",
+                applies=lambda plan, **_: __import__("vxpu.b12x_attention", fromlist=["x"]).on())
+def _attn_select_rows_b12x(q, kv_window, kv_compress, attn_sink, compress_idxs, softmax_scale, freqs_table, pos, rows,
+                           newest, rope_dim, window):
+    from . import b12x_attention as ba
+    return ba.attn_select_rows(q, kv_window, kv_compress, attn_sink, compress_idxs, softmax_scale, freqs_table, pos, rows,
+                               newest, rope_dim, window)
 
 
 @implementation("vxpu::attn_select_rows", "gpu-triton", ("cuda",), "rounding",
