@@ -4358,18 +4358,33 @@ FP4_ONE_MAXNREG = 0  # a register cap for the one-launch kernel (0: the compiler
 # gate/up kernel drains and its programs wait (gdc_wait) for the primary grid before reading g and u, so the
 # second launch's ramp overlaps the first's tail. A table knob (FP4_PDL); VXPU_FP4_PDL=1 is the A/B.
 FP4_PDL = os.environ.get("VXPU_FP4_PDL")
+# Chaining parity (hero run 16): VXPU_PDL_ALL=1 launches every kernel of the compiled step as a programmatic
+# dependent launch. The AOTI segments take it through inductor (config.triton.enable_pdl: the generated kernels
+# wait for their data inside, engine.configure_inductor); of our hand-written kernels only those with a gdc wait
+# inside take the launch flag (the fp4 expert kernels, through _fp4_pdl_mode), so a kernel without a wait is
+# never launched early. A table knob (PDL_ALL) and part of the kernel digest: it changes the generated code.
+PDL_ALL = os.environ.get("VXPU_PDL_ALL")
 try:
     from triton.language.extra.cuda import gdc_wait as _gdc_wait, gdc_launch_dependents as _gdc_launch_dependents
 except Exception:  # an older Triton, or no CUDA backend
     _gdc_wait = _gdc_launch_dependents = None
 
 
+def _pdl_all_on():
+    return PDL_ALL in ("1", 1, True)
+
+
 def _fp4_pdl_mode():
     """The direct path's down kernel as a programmatic dependent launch (FP4_PDL): 0 off; 1 its
     programs wait for the whole gate/up grid (gdc_wait); 2 each waits for its own pair's gate/up
     programs on an arrival counter (the pair's down tiles then overlap the other pairs' gate/up,
-    which one persistent kernel also did but at a register count that cost more than it saved)."""
-    if _gdc_wait is None or FP4_PDL in (None, False, "0"):
+    which one persistent kernel also did but at a register count that cost more than it saved).
+    With FP4_PDL unset, PDL_ALL turns mode 1 on; a table's or the environment's FP4_PDL stands."""
+    if _gdc_wait is None:
+        return 0
+    if FP4_PDL in (None, ""):
+        return 1 if _pdl_all_on() else 0
+    if FP4_PDL in (False, "0", 0):
         return 0
     return 2 if FP4_PDL in ("2", 2) else 1
 
