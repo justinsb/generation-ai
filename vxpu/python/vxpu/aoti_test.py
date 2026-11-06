@@ -37,12 +37,30 @@ class ReclaimExtractionsTest(unittest.TestCase):
                 with open(os.path.join(root, name, "model.so"), "w"):
                     pass
             os.makedirs(os.path.join(root, "aotinductor_empty"))
-            removed = aoti.reclaim_extractions(root, pid_alive=lambda pid: pid != dead.pid)
+            removed = aoti.reclaim_extractions(root, pid_alive=lambda pid: pid != dead.pid, grace_s=0)
             self.assertEqual(sorted(removed), sorted(["aotinductor_dead1", f"{key}.{dead.pid}.tmp"]))
             self.assertEqual(sorted(os.listdir(root)),
                              sorted([f"aotinductor_own", f"{key}.{os.getpid()}.tmp", "aotinductor_mixed",
                                      f"{key}.pt2", "aotinductor_other", "aotinductor_empty",
                                      f"not-a-key.{dead.pid}.tmp"]))
+
+    def test_leaves_a_fresh_extraction_of_a_dead_pids_package(self):
+        # a package built by an earlier process extracts under that process's pid: a live load must not lose it
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        key = "0123456789abcdef0123456789abcdef"
+        with tempfile.TemporaryDirectory() as root:
+            fresh = os.path.join(root, f"aotinductor_fresh/{key}.{dead.pid}.tmp")
+            stale = os.path.join(root, f"aotinductor_stale/{key}.{dead.pid}.tmp")
+            for d in (fresh, stale):
+                os.makedirs(d)
+                with open(os.path.join(d, "model.so"), "w"):
+                    pass
+            old = os.path.getmtime(stale) - 3 * 3600
+            os.utime(os.path.join(root, "aotinductor_stale"), (old, old))
+            removed = aoti.reclaim_extractions(root, pid_alive=lambda pid: pid != dead.pid, grace_s=7200)
+            self.assertEqual(removed, ["aotinductor_stale"])
+            self.assertTrue(os.path.exists(fresh))
 
     def test_alive_sees_this_process_and_not_a_dead_one(self):
         dead = subprocess.Popen([sys.executable, "-c", "pass"])

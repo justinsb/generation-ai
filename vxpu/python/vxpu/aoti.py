@@ -242,12 +242,18 @@ def _extraction_pids(root, name):
     return {int(m.group(1)) for m in inner}
 
 
-def reclaim_extractions(root=None, pid_alive=None):
+def reclaim_extractions(root=None, pid_alive=None, grace_s=7200):
     """Remove the package extraction directories of processes that no longer run.
 
     torch's package loader unpacks each .pt2 under TMPDIR, named by the pid, and removes it only when the loader
     object is destroyed; an executor that exits (or is killed) with its loaders alive leaves every one of them
-    behind, about 2 GB a load on the real model (293 packages a rank, four ranks). Returns the names removed."""
+    behind, about 2 GB a load on the real model (293 packages a rank, four ranks). Returns the names removed.
+
+    A package's entry paths carry the pid of the process that built it, so a live extraction of a package built
+    by an earlier process sits in a directory named for a pid that is dead; a directory written within `grace_s`
+    is left alone whatever its pid says (hero run 15, Nov 6: two 8-stream loads died at their prime when a process
+    starting during their extraction reclaimed the directory under them, "mz_zip error string: write callback
+    failed")."""
     root = root or _tmpdir()
     alive = pid_alive or _alive
     removed = []
@@ -255,9 +261,16 @@ def reclaim_extractions(root=None, pid_alive=None):
         names = os.listdir(root)
     except OSError:
         return removed
+    now = time.time()
     for name in names:
         pids = _extraction_pids(root, name)
         if pids and os.getpid() not in pids and not any(alive(p) for p in pids):
+            try:
+                fresh = now - os.path.getmtime(os.path.join(root, name)) < grace_s
+            except OSError:
+                fresh = False
+            if fresh:
+                continue
             shutil.rmtree(os.path.join(root, name), ignore_errors=True)
             removed.append(name)
     return removed

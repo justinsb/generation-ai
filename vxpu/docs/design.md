@@ -7553,6 +7553,34 @@ of the smallest flat program that fits with the drafts of the highest survival a
 4 at 97 percent conditional acceptance on code: the cap binds, not the policy, and a deeper step needs a block-7
 b16 export with flats at 96 and 112 rows.
 
+**The afternoon's readings and the close (Nov 6, 18:30 UTC).** The 8-stream prose entry moved: the fold's configuration
+with the experts under tensor parallelism instead of expert parallelism (VXPU_EXPERT_TP=4 VXPU_FP4_DN_KS=1 added to
+W48-8p-bf16f's env, tree48) read 866.6 on pod C and 869.2 / 874.5 on pod D at 23.5 to 23.8 ms a step against the EP4
+fold's 25.5, with the fold's text in all three runs: the entry is 869.2, the median of three, 105 percent of 827, and
+the code entry already ran that placement. The per-expert expert kernel (one working program per distinct expert,
+VXPU_FP4_DIRECT_FIRST=1, bit-identical to the direct form, 10 to 12 percent off the expert node on the bench) read
+461.8 / 14.21 ms against its same-tree control's 465.5 / 14.08 on the block-7 fixed shape with identical text: no
+measurable difference on the step, because the expert call runs on the side stream and the node's saving does not reach
+the critical path; the stamped-timeline trace that would place it was lost with pod D. Their stack combined in our step
+(their W4A8 expert kernel with a guard for the padded pairs, their block-FP8 dense linears with the tuned tiles, the
+fused bf16 wire) loses to our step at every shape measured: 16 streams prose 1,131.0 against the fold's 1,174.6 with a
+class move and code 1,193.6 against 1,538.9 with the same text (pod A); 8 streams prose 836.7 against the TP4 entry's
+869.2 (a 0.3 ms shorter step, 5 percent fewer tokens a step) and code 1,084.1 against 1,125.9 / 1,141.9 (the same
+tokens a step, a 1.1 ms slower step), with the kernel's presence shown by the layer-pool repack lines and the tuned
+plan lines of each load (pod B). The width code gap to their 1,247.5 and 1,845 is verify depth: our block-5 exports
+issue four drafts a stream at 0.96 conditional acceptance where their server accepts 6.0 to 6.5 a stream a step; the
+block-7 width exports (step_tokens 8, slack 7, flats to 64 and 128 rows) and the cost-model layout over them
+(speculation.cost_model) were built in the afternoon, and the 8-stream arm died twice at its prime before the Spot
+preemption of pods A and D at 18:15 took the set, its packages and the pending readings (the fixed depth-7 arm, the
+block-7 traces, the tuned dense option at width). The cause of the two deaths is ours and is fixed: a package carries
+the pid of the process that built it in its entry paths, so a later process extracting it writes under a directory
+named for a dead pid, and the AOTI extraction reclaim of any process starting meanwhile removed it under the live
+extraction ("mz_zip error string: write callback failed"); the reclaim now leaves directories written in the last two
+hours alone. Two harness rules learned the hard way on the same day: a chain's done-marker wait must be anchored to the
+whole line (a bare word matched a log note and woke three chains at once), and a readout shell must not carry a job
+script's name in its command line (the pod-level quiet check matched it and held a chain idle for thirteen minutes).
+The 16-stream deep arms continue on pod C into the evening.
+
 **The 16-stream code step on its critical path (Nov 6, pod C).** The stamped main program at 16 x 5 = 80 rows
 (tree50, the W50-16c env: TP4 slices, DN_KS 1, bf16 wire; one stamped step, 40.10 ms wall, the entries' 80-row flat
 reads 41.0): the routed expert node 21.58 ms on the path (54 percent; 472 to 668 us a layer), the 90 sum sites 6.14
