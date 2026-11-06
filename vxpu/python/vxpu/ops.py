@@ -999,11 +999,45 @@ def _shared_ffn_front_body(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, t
     return tk.fp8_gemv(tk.act_quant_dequant(h), w2, s2, 0, dtype).reshape(x.shape).to(dtype)
 
 
+# The shared expert in its GEMM form from this many rows (0: never): three bf16 GEMMs (cuBLAS) over the fp8 weights'
+# exact bf16 copies (the bf16 weight cache; fp8 e4m3 times an e8m0 scale is exact in bf16, so the products are the
+# GEMV form's and only the accumulation order differs), the SwiGLU and the w2 input's quantization as tensor
+# operations. Hero run 15 (Nov 6): at 16 streams the island's row-tiled GEMVs cost 276 to 305 us a layer at 80 rows
+# against a 35 MB byte floor, and the stamped step put the expert node beside them at 540 us a layer against 300 alone.
+# A plan knob (plan.KNOBS, home ops); VXPU_SHARED_FFN_GEMM_MIN_ROWS the A/B. The strategy is not lowered: the op runs
+# eagerly in the island's segment and the step graph captures its kernels; the packages' digest carries the knob.
+SHARED_FFN_GEMM_MIN_ROWS = int(os.environ.get("VXPU_SHARED_FFN_GEMM_MIN_ROWS", "0"))
+
+
+def _shared_ffn_gemm_rows(rows):
+    v = int(SHARED_FFN_GEMM_MIN_ROWS)
+    return v > 0 and rows >= v
+
+
+@implementation("vxpu::shared_ffn_front", "gpu-gemm-bf16", ("cuda",), "rounding",
+                "the GEMM form at width: three bf16 GEMMs over the fp8 weights' exact bf16 copies (the bf16 weight cache), "
+                "the SwiGLU and the w2 input's quantization as tensor operations (SHARED_FFN_GEMM_MIN_ROWS)",
+                applies=lambda plan, rows=0, dim=0, inter=0, **_: _shared_ffn_gemm_rows(rows) and plan["bf16_weight_cache"]
+                and dim % 32 == 0 and inter % 32 == 0)
+def _shared_ffn_front_gemm(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized):
+    K = x.shape[-1]
+    xq = (x if quantized else triton_ops.act_quant_dequant(x)).reshape(-1, K).to(torch.bfloat16)
+    gate = torch.nn.functional.linear(xq, _bf16_weight(w1, s1)).float()
+    up = torch.nn.functional.linear(xq, _bf16_weight(w3, s3)).float()
+    if swiglu_limit > 0:
+        up = up.clamp(-swiglu_limit, swiglu_limit)
+        gate = gate.clamp(max=swiglu_limit)
+    h = (torch.nn.functional.silu(gate) * up).to(x.dtype)
+    hq = triton_ops.act_quant_dequant(h).to(torch.bfloat16)
+    y = torch.nn.functional.linear(hq, _bf16_weight(w2, s2))
+    return y.reshape(x.shape).to(triton_ops.partial_dtype())
+
+
 @implementation("vxpu::shared_ffn_front", "gpu-fused", ("cuda",), "rounding",
                 "the fp8 GEMVs with the SwiGLU between them as tensor operations for the compiler to fuse (lowering, "
                 "VXPU_FUSE; where it measures cheaper than the kernels)",
                 applies=lambda plan, lowering=False, rows=0, **_: _fusing(plan, lowering, "shared_ffn_front")
-                and rows <= FP8_GEMV_MAX_ROWS and _fp8_native(), lowerable=True, fused=True)
+                and rows <= FP8_GEMV_MAX_ROWS and _fp8_native() and not _shared_ffn_gemm_rows(rows), lowerable=True, fused=True)
 def _shared_ffn_front_fused(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, tk=triton_ops):
     return _shared_ffn_front_body(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, tk)
 
@@ -1012,7 +1046,7 @@ def _shared_ffn_front_fused(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, 
                 "two or three Triton kernels: the input quantized unless it comes so, the dual GEMV over w1 and w3 "
                 "with the SwiGLU and the w2 input's quantization in its epilogue, the w2 GEMV",
                 applies=lambda plan, rows=0, dim=0, inter=0, **_: plan["triton"] and rows <= TRITON_MAX_ROWS
-                and dim % 32 == 0 and inter % 32 == 0 and _fp8_native(), lowerable=True)
+                and dim % 32 == 0 and inter % 32 == 0 and _fp8_native() and not _shared_ffn_gemm_rows(rows), lowerable=True)
 def _shared_ffn_front_triton(x, w1, s1, w3, s3, w2, s2, swiglu_limit, quantized, tk=triton_ops):
     # the four optional arguments spelled out: the traced launch (the registered vxpu_triton op the lowering
     # inlines) fills no defaults
