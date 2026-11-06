@@ -7207,3 +7207,21 @@ of the wait per site and rank) and the per-rank timeline (VXPU_PHASE_TRACE=all, 
 late and whether the skew is born before the sum or in the exchange; the pod placement (four cards of one socket a
 pod) is the change for the next run.
 
+**The deep budget at 16 streams code (Nov 6, pod C, tree88).** The block-7 b16 export (step_tokens 8, seven drafts a
+stream, flats to 128 rows, every program re-exported with the width mains' flags: sharded Markov head, fp8 draft
+head, embed-rows; a flat exports in 90 s, the main in 130). With the partial set (main, t3, t4, f96, f112, f128), the
+cost-model layout (plan sb7c): 1,533.9 tok/s aggregate at 51.73 ms median (51.38 mean), 5.82 drafts issued and 4.89
+accepted a stream a step, 5.89 tokens, programs f96 x 29, f112 x 32, f128 x 4, the 8-row rectangle x 16, conditional
+acceptance 0.941 0.954 0.941 0.945 0.948 0.892 0.831; the slots form 1,553.8 at 49.14 with 5.56 tokens, but that form
+takes the smallest flat that holds the live token rows (f96 here, f48 with the full set) and fills it by survival, a
+degenerate control at width (the W50 entries ran the rate-ordered slots form, the cost model's choice in effect).
+Against W50-16c-bf16f (block 5: 1,538.9 at 39.28, 4.18 tokens): the depth is there and the acceptance holds through
+the seventh position, but the step grew as much as the tokens, 0.21 to 0.23 ms a row at the margin from 96 to 128
+rows plus 1.5 ms of drafter at block 7 (4.8 against 3.3), so the harness aggregate is flat and the step arithmetic
+(16 x tokens over the step) reads 1,822 against 1,703, 7 percent. Their figures re-read from the vllm-ref record:
+"acceptance length 6.06" is accepted tokens over drafts from the /metrics deltas, the bonus token included, so tokens a
+stream a step; their per-position figures are marginal rates (summing to 5.58); their per-stream median 140.5 tok/s
+puts their step at 43.1 ms (44.7 in r2). So at 16 streams code the tokens a step are within 3 to 4 percent (6.06
+against 5.89) and the step is 7 to 9 ms longer (51.7 against 43 to 45), the sum kernels' spin on the slowest rank
+plus the drafter's extra; the skew trace measures the first. The fixed depth-7 arm on the 128-row program follows.
+
