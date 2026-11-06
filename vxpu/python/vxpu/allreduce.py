@@ -78,9 +78,17 @@ class Comm:
     round B, one per source rank) and counters [3] (push, reduce, gather arrivals), all on card
     j. Ranks are the position in `devices`; the sum is taken in rank order."""
 
-    def __init__(self, devices, sites, max_elems, dtype=torch.bfloat16, dtypes=None, hcs=()):
+    ALIGN = 256  # every region of a card's arena starts on this boundary
+    made = 0  # Comms shared so far in this process (the exchange's name)
+
+    def __init__(self, devices, sites, max_elems, dtype=torch.bfloat16, dtypes=None, hcs=(), local=None, share=None):
+        """`local`: the one rank this process owns (a process per rank, hero run 16), None for every
+        rank; `share(name, arena) -> [arena per rank]` exports this card's arena and opens the peers'
+        (ipc.share): a card's buffers are one allocation carved into the views below, so one IPC
+        handle a card carries them all, and the peers' views are the same offsets in their arenas."""
         self.devices = [torch.device(d) for d in devices]
         self.world = len(self.devices)
+        self.local = local
         self.hcs = tuple(hcs)  # the hc widths the mixing sums (allreduce_hc) use: their kernels primed too
         self.bound = False  # set once a captured graph holds this Comm's buffers: from then on it is never replaced
         self.sites = sites
@@ -93,29 +101,73 @@ class Comm:
         width = max(d.itemsize for d in self.dtypes)
         self.max_bytes = -(-max_elems * width // 16) * 16
         self.slice = -(-max_elems // max(self.world, 1))
-        slice_bytes = -(-self.slice * width // 16) * 16
+        self.slice_bytes = -(-self.slice * width // 16) * 16
+        self.layout, total = self._layout()
+        self.arenas = [None] * self.world
+        for j in self.local_ranks():
+            self.arenas[j] = torch.zeros(total, dtype=torch.uint8, device=self.devices[j])
+        if share is not None:
+            if local is None:
+                raise ValueError("allreduce: share() needs the local rank")
+            Comm.made += 1  # one name per Comm: the ranks replace theirs in step (setup), each a new exchange
+            shared = share(f"comm{Comm.made}", self.arenas[local])
+            for j in range(self.world):
+                if j != local:
+                    self.arenas[j] = shared[j]
         self.inbox, self.gbuf, self.flags, self.counters, self.slots, self.trace = [], [], [], [], [], []
-        for j, dev in enumerate(self.devices):
-            self.inbox.append([[torch.empty(self.max_bytes, dtype=torch.uint8, device=dev) if k != j else None
-                                for k in range(self.world)] for _ in range(sites)])
-            # the pull form's export slot a site: this card's partial, published here, read by the peers over PCIe
-            self.slots.append([torch.empty(self.max_bytes, dtype=torch.uint8, device=dev) for _ in range(sites)])
-            self.gbuf.append([[torch.empty(slice_bytes, dtype=torch.uint8, device=dev) if k != j else None
-                               for k in range(self.world)] for _ in range(sites)])
-            self.flags.append(torch.zeros(sites, 2, self.world, dtype=torch.int32, device=dev))
-            self.counters.append(torch.zeros(sites, 3, dtype=torch.int32, device=dev))
-            self.trace.append(torch.zeros(sites, 2, dtype=torch.int64, device=dev))  # SUM_TRACE: arrival, flags up (ns)
+        for j in range(self.world):
+            self._carve(j)
         if self.world > 1 and self.devices[0].type == "cuda":
             _enable_peers(self.devices)
             self.prime()
         # the reference's view: the partial each rank registered at a site (tests)
         self.registered = {}
 
+    def local_ranks(self):
+        return range(self.world) if self.local is None else [self.local]
+
+    def _layout(self):
+        """(regions, total bytes) of one card's arena: {name: (offset, bytes)} in a fixed order, every
+        region aligned; the same on every card, so a peer's view is the same offset in its arena."""
+        a = self.ALIGN
+        peers = max(self.world - 1, 0)
+        regions, at = {}, 0
+        for name, nbytes in (("inbox", self.sites * peers * self.max_bytes), ("slots", self.sites * self.max_bytes),
+                             ("gbuf", self.sites * peers * self.slice_bytes), ("flags", self.sites * 2 * self.world * 4),
+                             ("counters", self.sites * 3 * 4), ("trace", self.sites * 2 * 8)):
+            regions[name] = (at, nbytes)
+            at += -(-nbytes // a) * a
+        return regions, max(at, a)
+
+    def _carve(self, j):
+        """Card j's views into its arena: inbox[j][s][k] (None for k == j), slots[j][s], gbuf[j][s][k],
+        flags[j] [sites, 2, world] int32, counters[j] [sites, 3] int32, trace[j] [sites, 2] int64."""
+        arena = self.arenas[j]
+        peers = max(self.world - 1, 0)
+
+        def region(name):
+            off, n = self.layout[name]
+            return arena[off:off + n]
+        inbox, gbuf = region("inbox"), region("gbuf")
+        self.inbox.append([[inbox[((s * peers) + _slot(self, j, k)) * self.max_bytes:][:self.max_bytes] if k != j else None
+                            for k in range(self.world)] for s in range(self.sites)])
+        # the pull form's export slot a site: this card's partial, published here, read by the peers over PCIe
+        slots = region("slots")
+        self.slots.append([slots[s * self.max_bytes:][:self.max_bytes] for s in range(self.sites)])
+        self.gbuf.append([[gbuf[((s * peers) + _slot(self, j, k)) * self.slice_bytes:][:self.slice_bytes] if k != j else None
+                           for k in range(self.world)] for s in range(self.sites)])
+        self.flags.append(region("flags").view(torch.int32).view(self.sites, 2, self.world))
+        self.counters.append(region("counters").view(torch.int32).view(self.sites, 3))
+        self.trace.append(region("trace").view(torch.int64).view(self.sites, 2))  # SUM_TRACE: arrival, flags up (ns)
+
 
     def reset(self):
-        """Every card's flags and counters back to zero: the clean slate a first real step needs after
-        steps that pushed with nobody consuming (the prime's solo-mode eager steps, hero run 15)."""
-        for dev, f, c in zip(self.devices, self.flags, self.counters):
+        """Every card's flags and counters back to zero (a process per rank: its own card's; the peers
+        reset theirs, and the ranks meet before and after, engine._tp_prime): the clean slate a first
+        real step needs after steps that pushed with nobody consuming (the prime's solo-mode eager
+        steps, hero run 15)."""
+        for j in self.local_ranks():
+            dev, f, c = self.devices[j], self.flags[j], self.counters[j]
             with torch.cuda.device(dev) if dev.type == "cuda" else contextlib.nullcontext():
                 f.zero_()
                 c.zero_()
@@ -133,7 +185,8 @@ class Comm:
             return
         peers = self.world - 1
         block = block_elems()
-        for rank, dev in enumerate(self.devices):
+        for rank in self.local_ranks():
+            dev = self.devices[rank]
             for dtype in self.dtypes:
                 self._prime_one(dev, dtype, peers, block, rank)
                 for hc in self.hcs:  # the mixing kernels (the sum with hc_post in its epilogue) too
@@ -198,7 +251,7 @@ class Comm:
         self.registered.setdefault(site, {})[rank] = x
 
 
-def setup(devices, sites, max_elems, dtype=torch.bfloat16, dtypes=None, hcs=()):
+def setup(devices, sites, max_elems, dtype=torch.bfloat16, dtypes=None, hcs=(), local=None, share=None):
     """The process's Comm: the cards (ranks in this order), how many call sites a step has, the
     most elements one call sums, their dtype (`dtypes`: several, each primed), and `hcs`, the hc
     widths of the sums that mix the stream (their kernels primed here too, not lazily under a
@@ -224,7 +277,7 @@ def setup(devices, sites, max_elems, dtype=torch.bfloat16, dtypes=None, hcs=()):
         sites, max_elems = max(sites, c.sites), max(max_elems, c.max_elems)
         want = tuple(sorted(set(want) | set(c.dtypes), key=str))
         hcs = tuple(sorted(set(hcs) | set(c.hcs)))
-    _COMM = Comm(devices, sites, max_elems, want[0], want, hcs)
+    _COMM = Comm(devices, sites, max_elems, want[0], want, hcs, local=local, share=share)
     return _COMM
 
 

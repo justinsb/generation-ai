@@ -407,6 +407,22 @@ def branch_choice(kind, producers, main_last, main_last_kind, needs_wave, enable
 _CHOOSE_LOCK = threading.Lock()  # see StepGraph._compile_choose
 
 
+def _comm_args(world):
+    """allreduce.setup's cards and sharing for this world: every card from one process, or (a process
+    per rank) every card by index with this rank local and its arena shared over IPC (ipc.share)."""
+    if not world.multiproc:
+        return (world.devices,)
+    from . import multiproc
+    return (multiproc.all_devices(),)  # positional: devices; the keywords follow
+
+
+def _comm_kwargs(world):
+    if not world.multiproc:
+        return {}
+    from . import ipc, multiproc
+    return {"local": multiproc.rank(), "share": ipc.share}
+
+
 class StepGraph(torch.nn.Module):
     """A dataflow runner's step as one CUDA graph (module docstring)."""
 
@@ -859,12 +875,14 @@ class StepGraph(torch.nn.Module):
         # the stream's flag waits and the sum as aten kernels; about 110 us a reduction, measured
         # on the real model); one Comm per process, set up by rank 0 for every all-reduce site of
         # the step before any rank captures
-        from . import allreduce as ar
-        if self.world.multiproc:
+        from . import allreduce as ar, multiproc
+        if self.world.multiproc and not multiproc.push_sums():
             # a process per rank (multiproc.py): every collective is an NCCL call on this rank's communicator,
             # captured as any kernel; no inboxes, flags or Comm on the peers' cards, nothing to warm here
             self._comm_sums = False
             return
+        # under VXPU_MP_SUMS=push the one-process forms run across the processes: this rank's Comm holds its
+        # own card's arena and the peers' opened through CUDA IPC (ipc.py), the world's ring buffers likewise
         likes = {}
         hcs = set()
         warmed = set()
@@ -897,14 +915,15 @@ class StepGraph(torch.nn.Module):
         sums = [likes[n.name] for n in graph.nodes if n.kind == "allreduce"]
         self._comm_sums = (self.plan["reduce"] not in ("ring", "skip") and bool(sums) and dev.type == "cuda"
                            and triton_ops.triton is not None)
-        if self._comm_sums and self.rank == 0:
+        if self._comm_sums and (self.rank == 0 or self.world.multiproc):  # every process sets up its own Comm
             dtypes = {t.dtype for t in sums}
             if hcs:  # the mixing sums gather in the stream's dtype, and fp32 partials may cross as bf16 (push_bf16)
                 dtypes.add(torch.bfloat16)
             max_elems = max(t.numel() for t in sums)
             if TWO_PART_SUM:  # a two-part box holds the routed partial as fp32 and the shared output as bf16: 1.5 x
                 max_elems = -(-max_elems * 3 // 2)
-            ar.setup(self.world.devices, len(sums), max_elems, dtypes=sorted(dtypes, key=str), hcs=sorted(hcs))
+            ar.setup(*_comm_args(self.world), len(sums), max_elems, dtypes=sorted(dtypes, key=str), hcs=sorted(hcs),
+                     **_comm_kwargs(self.world))
         # the embedding's push-form buffers (VXPU_EMBED_ROWS=push, hero run 15): made here, outside any capture, as
         # the collectives' are; made inside the capture (the first call of _capture_embed_rows) they were a memset
         # node on the capture stream: cudaErrorStreamCaptureInvalidated at the first step graph capture (Nov 6)
@@ -1038,7 +1057,7 @@ class StepGraph(torch.nn.Module):
                 if gemv:
                     return mixed(ops.gemv_partial(x, weight, scale, add))
                 return mixed(x.clone()) if node.kind == "allreduce" else torch.cat([x] * self.world.size, dim=-1)
-        if self.world.multiproc:
+        if self.world.multiproc and not getattr(self, "_comm_sums", False):
             # a process per rank (multiproc.py): the partial (the GEMV's result for a fused site) summed as fp32
             # over NCCL on this rank's communicator and rounded once, then the mix as the reference's aten ops;
             # the head's gather an NCCL all-gather in rank order. Issued on the capturing stream, so a replay
@@ -1115,7 +1134,8 @@ class StepGraph(torch.nn.Module):
         # the rank's first vocabulary index is a constant of the op's call inside the segment (the split
         # hands a node only its tensor inputs), read off the segment's graph as _gemv_sum reads its op
         start = args_[2] if len(args_) > 2 else self._embed_start(node.name)
-        if self.world.multiproc:
+        from . import multiproc
+        if self.world.multiproc and not (multiproc.push_sums() and triton_ops.EMBED_ROWS_FORM == "push"):
             # a process per rank (multiproc.py): this rank's rows of the table, zero for the ids it does not own,
             # summed over NCCL; the peers' shards are in other processes. Not World.embed_rows: the prime captures
             # in solo mode, where its sum is a clone, and the captured graph is the one replayed (the first
@@ -1137,6 +1157,8 @@ class StepGraph(torch.nn.Module):
         # ids other ranks own, and the drafts were wrong: 723 against 1,048 tok/s at 16 streams)
         ref = node.args[1]
         shards = self.world.shards_of(("embed_rows", self.tag, getattr(ref, "name", node.name)))
+        if self.world.multiproc:  # the peers' shards are in other processes; the push form writes from this one alone
+            shards = [shard if i == self.rank else None for i in range(self.world.size)]
         if any(sh is None for sh in shards):
             raise RuntimeError(f"step graph: {node.name}: not every rank registered its shard before the capture "
                                f"({[i for i, sh in enumerate(shards) if sh is None]} missing)")

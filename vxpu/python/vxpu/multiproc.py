@@ -51,6 +51,24 @@ def active():
     return "VXPU_MP_WORLD" in os.environ
 
 
+# The step's sum form across the processes (hero run 16): "nccl", every collective an NCCL call on this rank's
+# communicator; "push", our push and scatter forms (allreduce.py) over the peers' inboxes opened through CUDA IPC
+# (ipc.py), the one-process step's kernels and sites, with NCCL kept for the eager steps before the capture.
+SUMS = os.environ.get("VXPU_MP_SUMS", "nccl")
+if SUMS not in ("nccl", "push"):
+    raise RuntimeError(f"VXPU_MP_SUMS={SUMS!r}: nccl or push")
+
+
+def push_sums():
+    """Whether the captured step's collectives take our push form over IPC-mapped peer buffers."""
+    return active() and SUMS == "push"
+
+
+def all_devices():
+    """Every rank's card, by index (rank r on cuda:r), the Comm's and the world's view of the box."""
+    return [torch.device("cuda", r) for r in range(world_size())]
+
+
 def rank():
     return int(os.environ["VXPU_MP_RANK"])
 
