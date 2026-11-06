@@ -61,6 +61,9 @@ class Policy:
     shape: str = "ragged"
     fill: str = "drafts"
     flat_rows: int = 0
+    # the flat layout's program chosen by expected accepted tokens per millisecond (the measured program times and the
+    # drafter's confidences) instead of the smallest program that holds the live rows (hero run 15, the deep budget)
+    cost_model: bool = False
     # slots (hero run 15, the fork's budgeted slot selection): every live row gets its token and the flat program's
     # remaining rows go to the (row, position) drafts with the highest survival; the flat shape only
     # budget (hero run 15, the fork's adaptive verification at concurrency): each step the depth that maximizes the
@@ -78,7 +81,8 @@ class Policy:
                 min_confidence=float(section.get("min_confidence", 0.0)),
                 max_new_experts=int(section.get("max_new_experts", 0)), candidates=int(section.get("candidates", 1)),
                 window=int(section.get("window", 16)), shape=section.get("shape", "ragged"),
-                fill=section.get("fill", "drafts"), flat_rows=int(section.get("flat_rows", 0)))
+                fill=section.get("fill", "drafts"), flat_rows=int(section.get("flat_rows", 0)),
+                cost_model=bool(section.get("cost_model", False)))
         p.check()
         return p
 
