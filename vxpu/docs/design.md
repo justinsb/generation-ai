@@ -7623,3 +7623,13 @@ against 42.81 (experts 481 against 483 us a layer, island 280 against 283, sites
 against 120, projections 32 against 31), the 128-row program 49.39 against 49.55: the two pieces are worth about 0.35
 ms a step here, where on d2 they were measured against the default tiles and 147-us sums. The 16-stream code entry in
 four processes stands at 1,648.4 tok/s at 51.59 ms (median of three).
+
+**The island's overlap at 128 rows (Nov 6, 22:39 UTC).** F99-16c-deep7-fixed7-fullstack-serial (F97 with
+VXPU_PARALLEL_BRANCHES=0): 1,599.2 tok/s at 53.06 ms (76 steps, 5.15 accepted), text identical: serializing the
+shared-expert island costs 1.47 ms a step against F97's 51.59, so the overlap pays at 128 rows. Stamped: the island
+serial 28 us a layer (1.11 ms a step) against the 280 to 383 us spans it shows overlapped (the span brackets the expert
+node it runs beside); the expert node 476 / 624 us a layer against 481 / 633 overlapped, so the overlap costs the node
+5 to 9 us a layer, not the 89 the stamps had suggested; the projections 25 us a launch against 32. The per-request
+policy's first run (F98) was a failed run, not a number: its per-row history was fed in the per-length path's host
+loop while the flat path's accepted counts arrive through the device ring, so every row kept the seed depth 7
+(issued 7.0, flat128 in 56 of 76 steps); fixed in 9be5a18, each row's move printed with its mean in 499d653.
