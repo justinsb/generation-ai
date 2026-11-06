@@ -1882,15 +1882,18 @@ class Engine:
                             f()
 
     @staticmethod
-    def _survival(rows_out, i, k, block, scale):
+    def _survival(rows_out, i, k, block, scale, estimator=None):
         """The confidence head's survival of row i's draft k + 1: the product of its conditional probabilities."""
         p = 1.0
         for q in range(k + 1):
-            p *= min(1.0, max(0.0, rows_out[i][block + q] / scale)) if scale else 1.0
+            if estimator is not None and scale:  # the fitted acceptance from the draft's probability (their estimator)
+                p *= estimator.p(q, rows_out[i][block + q] / scale)
+            else:
+                p *= min(1.0, max(0.0, rows_out[i][block + q] / scale)) if scale else 1.0
         return p
 
     def _flat_layout(self, issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale, cost_model=False,
-                     account=None, constants=None):
+                     account=None, constants=None, estimator=None):
         """The flat token-row verify's program and rows for a step (hero run 15): the smallest program of `flat_sizes`
         that fits the policy's depths (each live row its token then its issued drafts), its spare rows filled by
         `fill`: "drafts" gives them to the next drafts with the highest survival, in order, which keeps every row's
@@ -1911,7 +1914,7 @@ class Engine:
         sizes = [n for n in flat_sizes if n >= need]
         if not sizes:
             return None
-        cands = sorted(((self._survival(rows_out, i, k, block, scale), -i, i, k)
+        cands = sorted(((self._survival(rows_out, i, k, block, scale, estimator), -i, i, k)
                         for i in live for k in range(issued0[i], max_draft)), reverse=True) if (slots or fill == "drafts") else []
         T = sizes[0]
         if cost_model and slots and constants and len(sizes) > 1:
@@ -2040,9 +2043,11 @@ class Engine:
         req_depth = [max_draft] * R
         req_since = [0] * R
 
+        from . import acceptance_estimator as _ae
+        est = _ae.OnlineAcceptanceEstimator(max_draft) if getattr(policy, "estimator", False) else None
         def flat_layout(issued, rows_out, live):
             return self._flat_layout(issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale,
-                                     cost_model=cost_model, account=account)
+                                     cost_model=cost_model, account=account, estimator=est)
 
         def policy_depths(rows_out, live):
             # the host loop's rules on the drafter's rows: the confidence floor per row, the budget policy's common depth, or
@@ -2153,6 +2158,8 @@ class Engine:
                     out["drafted"] += issued[i]; out["accepted"] += n
                     account["issued"].append(issued[i]); account["accepted"].append(n)
                     req_hist[i].append(n)
+                    if est is not None:
+                        est.grade_row([v / scale for v in rows_out[i][block:2 * block]], issued[i], n)
                     for tok in ids[i][1:n + 1] + [choices[i][n]]:
                         tokens[i].append(tok)
                         if tok in self.eos_ids or len(tokens[i]) >= max_new_tokens:
@@ -2161,6 +2168,8 @@ class Engine:
                     pos[i] += n + 1
                     first[i] = choices[i][n]
                 out["step_ms"].append((t1 - t_drafted) * 1e3 + (account["draft_ms"][-1] if account["draft_ms"] else 0.0))
+                if est is not None:
+                    est.refit()
                 out["rows_active"].append(active)
                 account["verify_ms"].setdefault(vkey, []).append((t1 - t0) * 1e3)
                 if budget:
@@ -2239,6 +2248,8 @@ class Engine:
                 step_acc.append(int(n))
                 out["drafted"] += iss; out["accepted"] += n
                 account["issued"].append(iss); account["accepted"].append(n)
+                if est is not None:
+                    est.grade_row([v / scale for v in rows_out[i][block:2 * block]], int(iss), int(n))
                 req_hist[i].append(int(n))  # the per-request controller's history: the flat path's rows come back through the ring
                 for tok in ids_h[1:n + 1] + [ch_h[n]]:
                     tokens[i].append(tok)
@@ -2247,6 +2258,8 @@ class Engine:
                         break
                 pos[i] += n + 1
                 first[i] = ch_h[n]
+            if est is not None:
+                est.refit()
             out["rows_active"].append(active)
             if adaptive:
                 seen_acc.extend(step_acc)
@@ -2454,6 +2467,9 @@ class Engine:
                 out["token_ids"] += tokens
         if getattr(self._decode_run, "trace", None) is not None:
             self._decode_run.write_trace(last=len(out["step_ms"]))
+        if est is not None:
+            out["estimator"] = est.state()
+            print(f"[vxpu] acceptance estimator: {est.state()}")
         return out
 
     def _layer_device(self, layer):

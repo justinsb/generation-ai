@@ -65,6 +65,9 @@ class Policy:
     # the flat layout's program chosen by expected accepted tokens per millisecond (the measured program times and the
     # drafter's confidences) instead of the smallest program that holds the live rows (hero run 15, the deep budget)
     cost_model: bool = False
+    # the acceptance estimator in place of the confidence head's value for the survival (hero run 15, their
+    # OnlineAcceptanceEstimator; vxpu.acceptance_estimator): p_k = sigmoid(omega * logit(q) + beta_k), refit a step
+    estimator: bool = False
     # the cost model's constants from the plan (hero run 15, the user's static constants for a shape): the verify
     # programs' step times {"flat48": ms, ...} and the drafter's call in ms; given, the flat layout scores with them
     # instead of the account's medians, so every rank of a process-per-rank world makes the same choice from the same
@@ -89,7 +92,7 @@ class Policy:
                 max_new_experts=int(section.get("max_new_experts", 0)), candidates=int(section.get("candidates", 1)),
                 window=int(section.get("window", 16)), shape=section.get("shape", "ragged"),
                 fill=section.get("fill", "drafts"), flat_rows=int(section.get("flat_rows", 0)),
-                cost_model=bool(section.get("cost_model", False)),
+                cost_model=bool(section.get("cost_model", False)), estimator=bool(section.get("estimator", False)),
                 verify_ms={str(k): float(v) for k, v in (section.get("verify_ms") or {}).items()} or None,
                 draft_ms=float(section.get("draft_ms", 0.0)))
         p.check()
