@@ -7431,3 +7431,39 @@ few-row body not the cause; the down kernel's two-pairs-a-program form is what t
 experts, hence the direct-down arm. The sweep on the real 8-row routing (22 distinct of 48, 10 experts with 2+ rows)
 decides; it is where the byte saving is 54 percent.
 
+### What the planner takes from hero 15
+
+The planner owns the search. It runs the per-shape measurements itself, with a pass/fail bar per entry, and it
+measures combinations as combinations; single factors are isolated only to attribute a winner. A measurement of our
+own path cannot rule out a technique the competitor ships: the dense option's first width numbers were our
+integration (placement, cache coverage, a session closed too early), not their kernel.
+
+The cost surface is piecewise. Every knob of the day changed sign across row count: the bf16 wire costs the class at
+one row and gains 3 to 7 percent at 8 and 16 streams; their expert kernel is 0.3 ms faster at eight rows and 0.3 to
+0.75 ms a program slower at two to five; the one-launch form is a null at one row and hangs under overlapped graphs;
+FP4_DIRECT_MAX 8 against 48 is 6 ms a step at 8 streams. So the planner costs each site at the row counts the plan's
+programs run, on the critical path as the in-graph stamps measure it (a side branch can halve and move nothing), with
+fused regions costed in place, and it remembers that the L2 makes repeated reads free on a bench and a tile each in
+the step.
+
+Memory per card is a plan input. The planner reads each card's resident bytes after placement and refuses or
+re-places before a width run; cuda:0 holding the whole dense model beside its share cost two width runs.
+
+Classes are opt-in with a measured acceptance cost, and the defaults stay exact. A form whose text is not stable from
+run to run under a fixed policy cannot be a default; a policy that sizes rows from live timings uses a smoothed cost
+model, so its choices do not move with one step's noise.
+
+The record of a run carries the tree hash, the artifact md5 and bytes, the knobs in effect, the checks field, the
+repeat status (identical text or same class), the per-card memory after placement and while decoding, the build time,
+and the per-kernel device stamps. A skipped check is a hard error, not a dash in a table.
+
+Build cost shapes behaviour. Kernel selection lives outside the compiled graph, so a knob is a reload and not a
+45-minute rebuild, and packages build in parallel.
+
+The first strategies with measured pairs: adaptive draft depth under the cost-model budget, the fused bf16 wire, the
+fp8-head drafter recipe, TP4 experts, the per-expert expert kernel (9a3af21, with BK 128), their expert kernel chosen
+per shape, and their dense linears (the tuned numbers pending at the close).
+
+Filed for codebot today: #529 the skeleton (plan in, run, record out), #530 the first substitution from a measured
+table, #531 the evaluation loop command, #532 cost model v0 on the critical path, #533 concurrency and overlap in the
+record, beside #525 and #527.
