@@ -2109,9 +2109,11 @@ class Engine:
             prev = torch.cuda.Event(enable_timing=True)
             prev.record(stream)
         _check_prog = os.environ.get("VXPU_MP_CHECK_PROGRAM")
+        _bcast_rows = os.environ.get("VXPU_MP_BCAST_ROWS") == "1"
         _check_log = None
-        if _check_prog is not None:
+        if _check_prog is not None or _bcast_rows:
             from . import multiproc as _mp
+        if _check_prog is not None:
             _check_log = open(f"{_check_prog}-r{_mp.rank()}.log", "a")
         dfin, dbuf, dev_ev = launch_draft(0)
         j = 0
@@ -2119,7 +2121,16 @@ class Engine:
         while not all(done):
             dev_ev.synchronize()
             t_drafted = time.perf_counter()
-            rows_out = dbuf.tolist()
+            if _bcast_rows:
+                # every rank lays the step out from rank 0's drafter rows (tokens and confidences), as their
+                # verifier broadcasts the confidences from rank 0 before its budget selection: one small gather
+                # a step, and no survival source can make the ranks disagree (hero run 15, after F105)
+                _w = dbuf.shape[1]
+                _g = _mp.allgather(dbuf.to(torch.float32))
+                torch.cuda.synchronize(dev0)
+                rows_out = [[int(round(v)) for v in r[:_w]] for r in _g.tolist()]
+            else:
+                rows_out = dbuf.tolist()
             live = [i for i in range(R) if not done[i]]
             issued = policy_depths(rows_out, live)
             layout = flat_layout(issued, rows_out, live) if flat_sizes else None
