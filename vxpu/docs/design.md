@@ -7821,5 +7821,8 @@ band, a negative), F102c and F103 (the chained drafter passes, broken at the bou
 The pod A agent picked F106a up on a2 at 00:32:00 UTC: a2's tree97 with the engine, speculation and estimator files
 of 4ed762f, the drafter exported with VXPU_DRAFT_CONF=maxprob from the fork at 8c1e667, the flat f112 only (D94's
 path had f112 and f128), slots by survival from the estimator, no cost model, the program check and rank 0's rows
-on, the front table and no dense option. Its reading, if it lands, is the first of the estimator's and is booked by
-the pod A agent's report.
+on, the front table and no dense option; relaunched at 00:34:13 UTC with both flats (f112 and f128, D94's path) and
+the program logs at /root/hero/h15/progchoice-F106a-r0..3.log. Its reading, about 01:15 UTC, is the first of the
+estimator's and is booked from the pod A agent's report: issued and accepted a step, the program mix, the conditional
+list, the fitted omega and beta_k, the four program logs side by side, and the drafter's stamp wall against 2.27 to
+2.39 ms.
