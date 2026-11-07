@@ -7797,3 +7797,23 @@ independently and the run died in the first wave steps. Inferred from the code (
 fallback is the only other cost-model branch), to be confirmed by F106's per-rank program log. Commit 4cf95a6
 passes the estimator flag and the constants as parameters of the half-fixed loop. F106a rerun from the cache at
 00:16:45 UTC, F106 chained behind it.
+
+**Pod C evicted (Nov 7, 00:23:27 UTC); F106a and F106 not read.** Kubernetes evicted hero7d: "The node was low on
+resource: ephemeral-storage. Threshold quantity 10113676643, available 6626504Ki. Container hero was using
+33137428Ki"; the container did not stop within the grace period and the pod ended in phase Failed. F106a was in its
+wave after a clean load and warm-up on the second attempt; F106 had not started. Everything on the pod was lost: the
+memory-backed /mnt/ssd (the trees 90 to 97f, the maxprob drafter export, the AOTI caches, the checkpoint copy, the
+b12x environment) and /root/hero/h15 (the ledger, every run log, the program-choice logs, chains and plans). The
+probable cause of the 33 GB in the container layer is rank 1's core dump from F105's illegal-address crash at 23:48
+(a process holding about 90 GB; "timeout: the monitored command dumped core"); the memory-backed scratch does not
+count as ephemeral storage, the container's writable layer does. For the next pod: no core dumps (ulimit -c 0 in the
+entrypoint) and scratch on local disk. What survives is on the branch (the estimator, the maxprob feature in the fork,
+the two knobs, the scope fix, and under vxpu/dev/h15 the chains, plans and patch scripts). F106a and F106 are the
+morning's first runs on a rebuilt C: the drafter export with VXPU_DRAFT_CONF=maxprob (about 150 s plus nine drafter
+segments), then the two runs from the cache-less load (the flats and the main program rebuild their packages, about
+an hour of compile unless the AOTI cache is restored from a2 or d2, which hold the same digests).
+
+The night's results from C, in order: F97 1,648.4 tok/s at 51.59 ms (85.0 percent of the 16-stream code bar of
+1,938.2), F99 (the island's overlap pays 1.47 ms), F98b (the window controller, -16 percent, ratchet), F100 (the rows
+band, a negative), F102c and F103 (the chained drafter passes, broken at the boundary; not a parity item), F105
+(crashed; the cause located in code), F106a and F106 (not read; the pod evicted).
