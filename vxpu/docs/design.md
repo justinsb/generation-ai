@@ -7749,5 +7749,14 @@ keyed to the program without a band over the expert tiles) is untested. No repea
 **Slots by survival with the plan constants (F105, started Nov 6, 23:43:56 UTC).** Their mechanism's rank-identical
 form on F97's stack: policy slots, flat shape over the programs of 112 and 128 rows, cost_model with verify_ms
 {flat112: 46.9, flat128: 49.3} and draft_ms 2.4 from the plan (sb7c.json; f1a3792 patched onto a copy of tree97 as
-/mnt/ssd/src-tp-step97c, five hunks clean), one run, text gate against F97. The last start of the night; its reading
-follows.
+/mnt/ssd/src-tp-step97c, five hunks clean), one run, text gate against F97. Not read: rank 1 died at 23:48:17 UTC
+of a CUDA illegal memory access (caught at the step event's synchronize in _tp_spec_half) in the first steps of the
+16-stream wave; ranks 0, 2 and 3 spun on NCCL until all six processes were killed by pid at 00:04:31. The load was
+clean (36 drafter segments and both flats from the cache, three programs primed on four ranks in 80 s) and the warm-up
+ran nine steps over all three programs (the 8-row main twice, flat112 five times, flat128 twice; 38.3 ms a step,
+issued 6.41, accepted 3.02 a row) without a fault, so the fault sits in a wave step's layout, not in a package. A slots
+layout has never completed in four processes on C: the six-program arm ran out of memory at 94.9 GB (S93) and the
+two-flat arm faults, where the same layout in one process on d2 (D93, D94) ran. A defect to find before the form can
+be measured: the first candidates are the flat layout's row indices under slots when a row is done or issued zero
+drafts (the rank's own rows against the global ones), and the pinned ring's columns for a program smaller than the
+ring. Booked as crashed, unmeasured.
