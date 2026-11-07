@@ -1566,7 +1566,9 @@ class Engine:
                                            flat_sizes=flat_sizes, fill=policy.fill if flat else None,
                                            slots=flat and policy.policy == speculation.SLOTS,
                                            cost_model=flat and policy.cost_model,
-                                           request=flat and policy.policy == speculation.REQUEST)
+                                           request=flat and policy.policy == speculation.REQUEST,
+                                           estimator=flat and bool(getattr(policy, "estimator", False)),
+                                           constants=policy.constants() if flat else None)
                         break
                     if fixed and logits_sink is None and self._tp_spec_fixed_ready(S):
                         # the fixed shape: from here the drafter's and the verify's graphs chain on the stream and the
@@ -1984,7 +1986,7 @@ class Engine:
     def _tp_spec_half(self, R, n_rows, S, first, pos, tokens, done, max_new_tokens, max_draft, min_conf, block, scale,
                       lengths, budget, cost_rows, cost_draft, chosen_depths, out, account, dump=None,
                       adaptive=False, window=0, seen_acc=None, depth0=None, flat_sizes=(), fill=None, slots=False,
-                      cost_model=False, request=False):
+                      cost_model=False, request=False, estimator=False, constants=None):
         """The drafted step in its half-fixed shape (hero run 15): the verify's per-length program is still chosen on
         the host from the drafter's confidences (the confidence floor or the budget policy), but the step's acceptance
         runs on rank 0's device as in the fixed shape, the drafter's and the verify's input buffers are written on the
@@ -2044,10 +2046,11 @@ class Engine:
         req_since = [0] * R
 
         from . import acceptance_estimator as _ae
-        est = _ae.OnlineAcceptanceEstimator(max_draft) if getattr(policy, "estimator", False) else None
+        est = _ae.OnlineAcceptanceEstimator(max_draft) if estimator else None
         def flat_layout(issued, rows_out, live):
             return self._flat_layout(issued, rows_out, live, flat_sizes, fill, slots, R, S, max_draft, block, scale,
-                                     cost_model=cost_model, account=account, estimator=est)
+                                     cost_model=cost_model, account=account, estimator=est,
+                                     constants=constants)
 
         def policy_depths(rows_out, live):
             # the host loop's rules on the drafter's rows: the confidence floor per row, the budget policy's common depth, or
