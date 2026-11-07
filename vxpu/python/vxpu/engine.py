@@ -2129,7 +2129,7 @@ class Engine:
                 # verifier broadcasts the confidences from rank 0 before its budget selection: one small gather
                 # a step, and no survival source can make the ranks disagree (hero run 15, after F105)
                 _w = dbuf.shape[1]
-                _g = _mp.allgather(dbuf.to(torch.float32))
+                _g = _mp.allgather(dbuf.to(device=dev0, dtype=torch.float32))  # dbuf is the pinned host copy
                 torch.cuda.synchronize(dev0)
                 rows_out = [[int(round(v)) for v in r[:_w]] for r in _g.tolist()]
             else:
