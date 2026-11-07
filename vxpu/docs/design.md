@@ -7837,3 +7837,17 @@ estimator or the layout is implicated; the program-choice logs were empty becaus
 Fixed in dbd8ece: the gather takes a device copy of the 16 x 14 integers. d2 runs F106a-nobcast meanwhile (the
 estimator layout without the guard, the check on: its program logs say whether the ranks agree on their own), then
 F106a with the guard on the patched tree; hero7e takes the same line before F106.
+
+**F106a without the broadcast (d2, read about 01:50 UTC, one run, measured).** The estimator layout with the check
+on and the guard off, both flats, no cost model, a2/d2's stack (the front table, PDL, no dense option): 1,573.8 tok/s
+at 50.16 ms, 6.13 issued and 5.01 accepted a row-step, conditional 0.944, 0.943, 0.946, 0.921, 0.932, 0.897, 0.845;
+programs flat112 x60 at 46.95 ms and the 8-row ragged x21, never f128; text identical to D93 and D94. The four
+program logs read [112, 112, 112, 112] on all 107 steps: the ranks agree on their own with this survival source, so
+the guard was not needed here (it stays as their form, for a source that is not identical by construction). Against
+D94's 4.79 of 6.14 on the same pod and programs, the estimator's fill accepts 5.01 of 6.13, 4.6 percent more at the
+same issue. The maxprob feature costs about 0.4 ms a step on the drafter (stamp wall 2.77 against 2.27 to 2.39; the
+"dense other" phase 0.82 against 0.35 to 0.44: seven bias products and log-sum-exps on the fused Markov path). The
+fitted omega and beta_k did not print: the report had landed at the end of _generate_rows_tp, which returns early on
+the speculative path; the estimator itself ran (the flag reaches the loop, the grading and the refit run every step,
+_survival reads the fit). Fixed in 1000df3 (the report closes _tp_spec_half; vxpu/dev/h15/report_fix.py). F106 (the
+cost model with the constants and the fixed broadcast) runs on d2 from 01:44 UTC on the tree before that fix.
