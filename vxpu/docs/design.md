@@ -7787,3 +7787,13 @@ flag speculation.estimator: _survival takes p_k from the fit in place of the con
 layout. F106a is D94's exact path with the estimator (slots by survival over f112 + f128, no cost model; the A/B
 against D94's 4.79 accepted of 6.14 issued) with the per-rank program log; F106 adds the cost model with the plan
 constants, the program check and rank 0's rows for every rank. One run each, text gate against F97.
+
+The first F106a (00:10:40) died in its warm-up at 00:14:56 after two clean steps on flat112: NameError, `policy` is
+not in the half-fixed loop's scope (the estimator line read it there). The fix located F105's cause as well: the
+plan constants of f1a3792 reached _flat_layout only from the other layout call, never through the half-fixed loop,
+whose closure passed cost_model and account alone, so F105's cost model ran on the fallback branch, each process's
+own verify medians. Four processes, four timing histories: the ranks chose the 112 and 128-row programs
+independently and the run died in the first wave steps. Inferred from the code (the constants never arrived and the
+fallback is the only other cost-model branch), to be confirmed by F106's per-rank program log. Commit 4cf95a6
+passes the estimator flag and the constants as parameters of the half-fixed loop. F106a rerun from the cache at
+00:16:45 UTC, F106 chained behind it.
