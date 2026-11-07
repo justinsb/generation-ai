@@ -7826,3 +7826,14 @@ the program logs at /root/hero/h15/progchoice-F106a-r0..3.log. Its reading, abou
 estimator's and is booked from the pod A agent's report: issued and accepted a step, the program mix, the conditional
 list, the fitted omega and beta_k, the four program logs side by side, and the drafter's stamp wall against 2.27 to
 2.39 ms.
+
+**F106a's fault was the broadcast knob (Nov 7, 01:36 UTC on d2, located 01:45).** On a2 and then d2 all four ranks
+raised an illegal memory access within one second at the synchronize after the rows broadcast's allgather, on the
+third warm-up step (the first on which that branch runs after the ragged and flat steps set the buffers up). The
+frames say why: the host loop reads the drafter's output from a pinned host buffer (launch_draft copies the device
+output into pinned_draft[j % 2] and returns that), and the VXPU_MP_BCAST_ROWS branch handed ncclAllGather that host
+buffer's pointer as the send buffer, which NCCL reads as a device address. Nothing in the maxprob drafter, the
+estimator or the layout is implicated; the program-choice logs were empty because the check runs after the layout.
+Fixed in dbd8ece: the gather takes a device copy of the 16 x 14 integers. d2 runs F106a-nobcast meanwhile (the
+estimator layout without the guard, the check on: its program logs say whether the ranks agree on their own), then
+F106a with the guard on the patched tree; hero7e takes the same line before F106.
