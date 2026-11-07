@@ -7754,9 +7754,36 @@ of a CUDA illegal memory access (caught at the step event's synchronize in _tp_s
 16-stream wave; ranks 0, 2 and 3 spun on NCCL until all six processes were killed by pid at 00:04:31. The load was
 clean (36 drafter segments and both flats from the cache, three programs primed on four ranks in 80 s) and the warm-up
 ran nine steps over all three programs (the 8-row main twice, flat112 five times, flat128 twice; 38.3 ms a step,
-issued 6.41, accepted 3.02 a row) without a fault, so the fault sits in a wave step's layout, not in a package. A slots
-layout has never completed in four processes on C: the six-program arm ran out of memory at 94.9 GB (S93) and the
-two-flat arm faults, where the same layout in one process on d2 (D93, D94) ran. A defect to find before the form can
-be measured: the first candidates are the flat layout's row indices under slots when a row is done or issued zero
-drafts (the rank's own rows against the global ones), and the pinned ring's columns for a program smaller than the
-ring. Booked as crashed, unmeasured.
+issued 6.41, accepted 3.02 a row) without a fault, so the fault sits in a wave step's layout, not in a package. The
+slots layout itself has run in four processes: D94 (d2, 21:59, f112 + f128, the fill by survival, no cost model) ran
+85 steps clean. What F105 added is the per-step program choice by the cost model, and a rank-divergent choice gives
+exactly this crash (one rank in the 112-row program while the others sum at 128 rows: an illegal address in the sum
+or the ring). The suspect is the survival's source: the confidence head's value, read by each rank from its own
+drafter output; if the ranks' values differ in the last digit, the fill order and the 112-against-128 choice can
+flip on the sum where D94's fill (96 slots over 16 rows all at 6) never changed a row's count. Their code does not
+rely on determinism here: the verifier broadcasts the confidences from rank 0 before the budget selection
+(adaptive_verification.py, tp_group.broadcast of _confidence_probs), the cost curves are broadcast from rank 0, and
+the vocab-parallel draft head all-gathers each rank's (max, sumexp) so the argmax and the normalizer agree on every
+rank (vocab_parallel.py). Booked as crashed, unmeasured; two knobs follow in the engine for the next runs:
+VXPU_MP_CHECK_PROGRAM (every step's chosen program gathered over NCCL and logged per rank, a disagreement stops the
+run with the step number) and VXPU_MP_BCAST_ROWS (every rank lays the step out from rank 0's drafter rows, their
+guard, one gather of the [16, 14] integer buffer a step).
+
+**The acceptance estimator, their form on our side (F106a and F106, started Nov 7, 00:10:40 UTC).** Built in 25
+minutes: (1) the feature. Under VXPU_DRAFT_CONF=maxprob the drafter's confidence is the log-odds of the chosen token's
+probability under the Markov-biased logits, exactly: each rank puts its partial log-sum-exp in the exchanged pair's
+spare float (the pair carried two zero floats, so no extra collective), the global log-sum-exp is taken over the four
+partials after the gather, log q = the chosen logit less it; on the fused Markov-pick path the bias is recomputed from
+the returned Markov embedding as a [16, D] by [D, V/4] fp32 product, since the kernel leaves the logits slice
+unbiased. The Draft module's sigmoid then yields q itself, so the host reads q / 1e6 unchanged. The feature is the
+same on every rank by construction, as their (max, sumexp) all-gather makes theirs. (2) The estimator
+(vxpu/acceptance_estimator.py): omega init 0.5 shared, beta_k init -0.2, p_k = sigmoid(omega * logit(q) + beta_k)
+clamped at +-40; after every step each live row grades its accepted drafts 1 and its first rejected 0 (the bonus
+token is not a draft), then one damped Newton step on the retained history (1,024 per position) solves the arrowhead
+normal equations exactly (the Schur complement on the slope), a ridge of 1.0 toward the init as the damping and a
+step clamp of 1.0; numpy, deterministic, identical on every rank. On synthetic data it recovers omega 0.9 and seven
+intercepts to +-0.15 after 120 steps of 16 rows; two copies fed the same data are bitwise identical. (3) The plan
+flag speculation.estimator: _survival takes p_k from the fit in place of the confidence head's value for the slots
+layout. F106a is D94's exact path with the estimator (slots by survival over f112 + f128, no cost model; the A/B
+against D94's 4.79 accepted of 6.14 issued) with the per-rank program log; F106 adds the cost model with the plan
+constants, the program check and rank 0's rows for every rank. One run each, text gate against F97.
