@@ -7817,3 +7817,9 @@ The night's results from C, in order: F97 1,648.4 tok/s at 51.59 ms (85.0 percen
 1,938.2), F99 (the island's overlap pays 1.47 ms), F98b (the window controller, -16 percent, ratchet), F100 (the rows
 band, a negative), F102c and F103 (the chained drafter passes, broken at the boundary; not a parity item), F105
 (crashed; the cause located in code), F106a and F106 (not read; the pod evicted).
+
+The pod A agent picked F106a up on a2 at 00:32:00 UTC: a2's tree97 with the engine, speculation and estimator files
+of 4ed762f, the drafter exported with VXPU_DRAFT_CONF=maxprob from the fork at 8c1e667, the flat f112 only (D94's
+path had f112 and f128), slots by survival from the estimator, no cost model, the program check and rank 0's rows
+on, the front table and no dense option. Its reading, if it lands, is the first of the estimator's and is booked by
+the pod A agent's report.
