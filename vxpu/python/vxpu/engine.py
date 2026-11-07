@@ -2108,6 +2108,11 @@ class Engine:
         with torch.cuda.device(dev0):
             prev = torch.cuda.Event(enable_timing=True)
             prev.record(stream)
+        _check_prog = os.environ.get("VXPU_MP_CHECK_PROGRAM")
+        _check_log = None
+        if _check_prog is not None:
+            from . import multiproc as _mp
+            _check_log = open(f"{_check_prog}-r{_mp.rank()}.log", "a")
         dfin, dbuf, dev_ev = launch_draft(0)
         j = 0
         last = None
@@ -2124,6 +2129,17 @@ class Engine:
             else:
                 vrows = next((n for n in lengths if n >= max(issued) + 1), S)
                 verify, vkey = self._tp_decodes[vrows], vrows
+            if _check_prog is not None:
+                # the rank-identity check (hero run 15, after F105): every rank's chosen program this step, gathered over
+                # NCCL and logged; a disagreement stops the run here rather than as an illegal address in a collective
+                _t = torch.tensor([float(T if layout is not None else vrows)], dtype=torch.float32, device=dev0)
+                _gath = _mp.allgather(_t)
+                torch.cuda.synchronize(dev0)
+                _choice = [int(v) for v in _gath.tolist()]
+                _check_log.write(f"{j} {_choice}\n")
+                _check_log.flush()
+                if len(set(_choice)) > 1:
+                    raise RuntimeError(f"program choice diverged at step {j}: ranks chose {_choice}")
             if not verify.captured_ready():
                 # the host path for this step (the program's capture): the ids on the host, the acceptance on the host,
                 # then the device state follows the host's
