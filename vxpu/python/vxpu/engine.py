@@ -2317,6 +2317,9 @@ class Engine:
                     with torch.cuda.device(dev):
                         if callable(f):
                             f()
+        if est is not None:  # the fitted estimator at the end of the loop (hero run 15)
+            out["estimator"] = est.state()
+            print(f"[vxpu] acceptance estimator: {est.state()}", flush=True)
 
     def _tp_self_fed_ready(self):
         """Whether the tensor-parallel decode can feed itself (stepgraph.GRAPH_TOKEN): every rank's
@@ -2497,9 +2500,6 @@ class Engine:
                 out["token_ids"] += tokens
         if getattr(self._decode_run, "trace", None) is not None:
             self._decode_run.write_trace(last=len(out["step_ms"]))
-        if est is not None:
-            out["estimator"] = est.state()
-            print(f"[vxpu] acceptance estimator: {est.state()}")
         return out
 
     def _layer_device(self, layer):
