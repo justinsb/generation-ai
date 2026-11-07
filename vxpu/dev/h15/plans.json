@@ -1,0 +1,7 @@
+{
+  "sb7a.json": {"format": "vxpu-plan/1", "speculation": {"draft": 7, "policy": "slots", "shape": "flat", "flat_rows": 0, "cost_model": false, "verify_ms": {"flat112": 46.9, "flat128": 49.3}, "draft_ms": 2.4, "estimator": true}},
+  "sb7e.json": {"format": "vxpu-plan/1", "speculation": {"draft": 7, "policy": "slots", "shape": "flat", "flat_rows": 0, "cost_model": true, "verify_ms": {"flat112": 46.9, "flat128": 49.3}, "draft_ms": 2.4, "estimator": true}},
+  "sb7c.json": {"format": "vxpu-plan/1", "speculation": {"draft": 7, "policy": "slots", "shape": "flat", "flat_rows": 0, "cost_model": true, "verify_ms": {"flat112": 46.9, "flat128": 49.3}, "draft_ms": 2.4}},
+  "f7est.json": {"format": "vxpu-plan/1", "speculation": {"draft": 7, "policy": "fixed", "shape": "flat", "flat_rows": 128, "estimator": true}},
+  "f7flat.json": {"format": "vxpu-plan/1", "speculation": {"draft": 7, "policy": "fixed", "shape": "flat", "flat_rows": 128}}
+}
